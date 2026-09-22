@@ -5,8 +5,11 @@
  *  (README.md 참고)
  *
  *    EMAIL_TO          이메일 받을 주소. 비워두면 내 구글 계정으로 옵니다.
- *    TELEGRAM_TOKEN    텔레그램 봇 토큰      ─┐ 즉시 푸시를 원하면
- *    TELEGRAM_CHAT_ID  텔레그램 채팅 ID      ─┘ 둘 다 넣으세요
+ *    TELEGRAM_TOKEN    알림 봇 토큰          ─┐ 즉시 푸시를 원하면
+ *    TELEGRAM_CHAT_ID  알림 봇 채팅 ID       ─┘ 둘 다 넣으세요
+ *
+ *    STATUS_TELEGRAM_TOKEN     상태 봇 토큰    ─┐ 살아있음 표시를 따로 받고
+ *    STATUS_TELEGRAM_CHAT_ID   상태 봇 채팅 ID ─┘ 싶으면 (선택)
  *    NTFY_TOPIC        ntfy 토픽 이름 (선택)
  *    WEBAPP_URL        텔레그램에서 말을 걸면 답하게 하려면 (README 참고)
  *
@@ -226,7 +229,7 @@ function createTrigger() {
 /** 기억해 둔 상태를 지운다. 다음 실행에서 현재 열린 날을 전부 새 빈자리로 다시 알립니다. */
 function resetState() {
   var props = PropertiesService.getScriptProperties();
-  ['openSet', 'hallCode', 'statusMsgId', 'failCount', 'failAlerted', 'lastError', 'lastSuccessAt', 'lastHeartbeatAt']
+  ['openSet', 'hallCode', 'statusMsgId', 'statusMsgChat', 'failCount', 'failAlerted', 'lastError', 'lastSuccessAt', 'lastHeartbeatAt']
     .forEach(function (k) { props.deleteProperty(k); });
   console.log('상태를 초기화했습니다.');
 }
@@ -252,30 +255,33 @@ function handleTelegramUpdate_(e) {
   if (!secret || !e || !e.parameter || e.parameter.s !== secret) return;
   if (!e.postData || !e.postData.contents) return;
 
+  // 봇이 둘이면 주소 뒤의 b= 로 구분한다. 받은 봇으로 답해야 하기 때문이다.
+  var which = e.parameter.b === 'status' ? 'status' : 'main';
+
   var update = JSON.parse(e.postData.contents);
   var msg = update.message || update.edited_message;
   if (!msg || !msg.chat || !msg.text) return;
   // 내 대화방에서 온 것만 받는다.
-  if (String(msg.chat.id) !== prop_('TELEGRAM_CHAT_ID')) return;
+  if (String(msg.chat.id) !== tgChat_(which)) return;
 
   var text = String(msg.text).trim();
   if (/^\/?(확인|체크|check|refresh)/i.test(text)) {
-    reply_('🔎 지금 확인하고 있습니다. 20초쯤 걸립니다…');
-    reply_(runOnDemand_());
+    reply_(which, '🔎 지금 확인하고 있습니다. 20초쯤 걸립니다…');
+    reply_(which, runOnDemand_());
   } else if (/^\/?(도움|help|start)/i.test(text)) {
-    reply_(['보낼 수 있는 말:', '',
-            '• 상태 — 지금 상태 보기',
-            '• 확인 — 지금 바로 다시 확인',
-            '', '아무 말이나 보내도 상태를 알려드립니다.'].join('\n'));
+    reply_(which, ['보낼 수 있는 말:', '',
+                   '• 상태 — 지금 상태 보기',
+                   '• 확인 — 지금 바로 다시 확인',
+                   '', '아무 말이나 보내도 상태를 알려드립니다.'].join('\n'));
   } else {
-    reply_(storedStatusText_());
+    reply_(which, storedStatusText_());
   }
 }
 
-function reply_(text) {
+function reply_(which, text) {
   telegramApi_('sendMessage', {
-    chat_id: prop_('TELEGRAM_CHAT_ID'), text: text, disable_web_page_preview: true
-  });
+    chat_id: tgChat_(which), text: text, disable_web_page_preview: true
+  }, which);
 }
 
 /** 요청을 받아 지금 바로 한 번 확인한다. 결과 문장을 돌려준다. */
@@ -332,7 +338,7 @@ function ago_(iso) {
 
 /** 텔레그램에서 말을 걸면 답하도록 켠다. WEBAPP_URL 을 먼저 넣어야 한다. */
 function setupTelegramCommands() {
-  if (!hasTelegram_()) {
+  if (!hasTelegram_('main')) {
     console.log('먼저 TELEGRAM_TOKEN 과 TELEGRAM_CHAT_ID 를 넣으세요.');
     return;
   }
@@ -348,27 +354,39 @@ function setupTelegramCommands() {
     secret = Utilities.getUuid().replace(/-/g, '');
     props.setProperty('WEBHOOK_SECRET', secret);
   }
-  var res = telegramApi_('setWebhook', {
-    url: url + (url.indexOf('?') === -1 ? '?' : '&') + 's=' + secret,
-    allowed_updates: ['message']
+  var bots = hasStatusBot_() ? ['main', 'status'] : ['main'];
+  bots.forEach(function (which) {
+    var hook = url + (url.indexOf('?') === -1 ? '?' : '&') + 's=' + secret + '&b=' + which;
+    var res = telegramApi_('setWebhook', { url: hook, allowed_updates: ['message'] }, which);
+    if (!res.ok) {
+      console.log((which === 'main' ? '알림 봇' : '상태 봇') + ' 설정 실패: ' +
+                  JSON.stringify(res).slice(0, 300));
+      return;
+    }
+    try {
+      telegramApi_('setMyCommands', { commands: [
+        { command: 'status', description: '지금 상태 보기' },
+        { command: 'check', description: '지금 바로 확인' }
+      ]}, which);
+    } catch (e) { /* 메뉴 등록 실패는 동작에 지장 없다 */ }
+    console.log((which === 'main' ? '알림 봇' : '상태 봇') + ' 켰습니다.');
   });
-  if (!res.ok) {
-    console.log('설정 실패: ' + JSON.stringify(res).slice(0, 300));
-    return;
-  }
-  try {
-    telegramApi_('setMyCommands', { commands: [
-      { command: 'status', description: '지금 상태 보기' },
-      { command: 'check', description: '지금 바로 확인' }
-    ]});
-  } catch (e) { /* 메뉴 등록 실패는 동작에 지장 없다 */ }
-  console.log('켰습니다. 텔레그램에서 봇에게 "상태" 라고 보내보세요.');
+  console.log('텔레그램에서 봇에게 "상태" 라고 보내보세요.');
 }
 
 /** 메시지 응답을 끈다. (findTelegramChatId 를 다시 쓰려면 꺼야 한다) */
 function removeTelegramCommands() {
-  telegramApi_('deleteWebhook', {});
+  ['main', 'status'].forEach(function (which) {
+    if (which === 'status' && !hasStatusBot_()) return;
+    try { telegramApi_('deleteWebhook', {}, which); }
+    catch (e) { console.log(which + ' 끄기 실패: ' + e.message); }
+  });
   console.log('메시지 응답을 껐습니다.');
+}
+
+/** 상태 봇의 채팅 ID 를 찾아준다. STATUS_TELEGRAM_TOKEN 을 먼저 넣으세요. */
+function findStatusTelegramChatId() {
+  findChatId_('status', 'STATUS_TELEGRAM_TOKEN', 'STATUS_TELEGRAM_CHAT_ID');
 }
 
 /** 지금 설정이 어떻게 돼 있는지 보여준다. 비밀값은 '설정됨' 으로만 찍는다. */
@@ -379,7 +397,8 @@ function showSettings() {
   console.log('감시할 달: ' + (months ? months + ' (직접 지정)' :
               '열린 달 전부 자동 (최대 ' + MAX_MONTHS_AHEAD + '달 앞까지)'));
   console.log('알림 채널: ' + enabledChannels_().map(function (c) { return c.name; }).join(' → '));
-  console.log('  텔레그램: ' + (prop_('TELEGRAM_TOKEN') && prop_('TELEGRAM_CHAT_ID') ? '설정됨' : '없음'));
+  console.log('  텔레그램(알림): ' + (hasTelegram_('main') ? '설정됨' : '없음'));
+  console.log('  텔레그램(상태): ' + (hasStatusBot_() ? '따로 설정됨' : '알림 봇이 겸함'));
   console.log('  ntfy: ' + (prop_('NTFY_TOPIC') ? '설정됨' : '없음'));
   console.log('  이메일: ' + (prop_('EMAIL_TO') ? '설정됨' : '내 구글 계정'));
   console.log('기억 중인 빈자리: ' + readOpenSet_(props).length + '건');
@@ -437,9 +456,13 @@ function findHallCodes() {
  * 봇을 만든 뒤 텔레그램에서 그 봇에게 아무 말이나 보내고 이 함수를 실행하세요.
  */
 function findTelegramChatId() {
-  var token = prop_('TELEGRAM_TOKEN');
+  findChatId_('main', 'TELEGRAM_TOKEN', 'TELEGRAM_CHAT_ID');
+}
+
+function findChatId_(which, tokenKey, chatKey) {
+  var token = prop_(tokenKey);
   if (!token) {
-    console.log('먼저 스크립트 속성에 TELEGRAM_TOKEN 을 넣으세요.');
+    console.log('먼저 스크립트 속성에 ' + tokenKey + ' 을 넣으세요.');
     return;
   }
   var res = UrlFetchApp.fetch('https://api.telegram.org/bot' + token + '/getUpdates',
@@ -468,7 +491,7 @@ function findTelegramChatId() {
     if (msg && msg.chat) ids[msg.chat.id] = (msg.chat.title || msg.chat.first_name || '');
   });
   Object.keys(ids).forEach(function (id) {
-    console.log('채팅 ID: ' + id + '  (' + ids[id] + ')  ← 이 숫자를 TELEGRAM_CHAT_ID 에 넣으세요');
+    console.log('채팅 ID: ' + id + '  (' + ids[id] + ')  ← 이 숫자를 ' + chatKey + ' 에 넣으세요');
   });
 }
 
@@ -598,9 +621,9 @@ function enabledChannels_() {
   return channels;
 }
 
-function telegramApi_(method, payload) {
+function telegramApi_(method, payload, which) {
   var res = UrlFetchApp.fetch(
-    'https://api.telegram.org/bot' + prop_('TELEGRAM_TOKEN') + '/' + method,
+    'https://api.telegram.org/bot' + tgToken_(which) + '/' + method,
     {
       method: 'post',
       contentType: 'application/json',
@@ -622,8 +645,44 @@ function sendTelegram_(title, message) {
   return true;
 }
 
-function hasTelegram_() {
-  return !!(prop_('TELEGRAM_TOKEN') && prop_('TELEGRAM_CHAT_ID'));
+/**
+ * 봇은 둘까지 쓴다.
+ *   main   - 빈자리·실패 알림. 꼭 봐야 하는 것만 온다.
+ *   status - 살아있음 표시와 하트비트. 설정하지 않으면 main 이 겸한다.
+ * 나눠 두면 알림 대화방이 조용해서, 진짜 알림이 묻히지 않는다.
+ */
+function tgToken_(which) {
+  if (which === 'status') return prop_('STATUS_TELEGRAM_TOKEN') || prop_('TELEGRAM_TOKEN');
+  return prop_('TELEGRAM_TOKEN');
+}
+
+function tgChat_(which) {
+  if (which === 'status') return prop_('STATUS_TELEGRAM_CHAT_ID') || prop_('TELEGRAM_CHAT_ID');
+  return prop_('TELEGRAM_CHAT_ID');
+}
+
+function hasTelegram_(which) {
+  return !!(tgToken_(which) && tgChat_(which));
+}
+
+/** 상태 전용 봇을 따로 뒀는가? */
+function hasStatusBot_() {
+  return !!(prop_('STATUS_TELEGRAM_TOKEN') && prop_('STATUS_TELEGRAM_CHAT_ID'));
+}
+
+/** 운영 신호(하트비트 등). 상태 봇이 있으면 그쪽으로, 없으면 평소 알림 경로로. */
+function notifyStatus_(title, message) {
+  if (hasStatusBot_()) {
+    try {
+      telegramApi_('sendMessage', {
+        chat_id: tgChat_('status'), text: title + '\n\n' + message, disable_web_page_preview: true
+      }, 'status');
+      return true;
+    } catch (e) {
+      console.log('상태 봇 전송 실패, 평소 경로로 보냅니다: ' + e.message);
+    }
+  }
+  return notify_(title, message, 'min');
 }
 
 /**
@@ -633,16 +692,23 @@ function hasTelegram_() {
  * 아무 일이 없을 때도 눈에 보이는 무언가가 있어야 한다. 고쳐 쓰기라 알림은 울리지 않는다.
  */
 function updateStatusMessage_(props, scan, openNow) {
-  if (!hasTelegram_()) return;
+  if (!hasTelegram_('status')) return;
+  var chat = tgChat_('status');
+  // 상태 봇을 바꿨다면 예전 대화방의 메시지 번호는 쓸 수 없다.
+  if (props.getProperty('statusMsgChat') !== String(chat)) {
+    props.deleteProperty('statusMsgId');
+    props.setProperty('statusMsgChat', String(chat));
+  }
+
   var text = buildStatusText_(scan, openNow);
   var id = props.getProperty('statusMsgId');
 
   if (id) {
     try {
       telegramApi_('editMessageText', {
-        chat_id: prop_('TELEGRAM_CHAT_ID'), message_id: Number(id),
+        chat_id: chat, message_id: Number(id),
         text: text, disable_web_page_preview: true
-      });
+      }, 'status');
       return;
     } catch (e) {
       // 메시지를 지웠거나 너무 오래됐을 수 있다. 아래에서 새로 만든다.
@@ -651,9 +717,9 @@ function updateStatusMessage_(props, scan, openNow) {
   }
   try {
     var res = telegramApi_('sendMessage', {
-      chat_id: prop_('TELEGRAM_CHAT_ID'), text: text,
+      chat_id: chat, text: text,
       disable_web_page_preview: true, disable_notification: true
-    });
+    }, 'status');
     if (res && res.result && res.result.message_id) {
       props.setProperty('statusMsgId', String(res.result.message_id));
     }
@@ -762,8 +828,8 @@ function maybeHeartbeat_(props, openCount) {
   if (last && now - last < HEARTBEAT_HOURS * 3600 * 1000) return;
   props.setProperty('lastHeartbeatAt', String(now));
   if (!last) return;  // 처음 실행에서는 보내지 않고 기준 시각만 잡는다.
-  notify_('💓 ' + HALL_NAME + ' 감시 중',
-          '감시는 정상 동작 중입니다. 현재 열린 날 ' + openCount + '건.', 'min');
+  notifyStatus_('💓 ' + HALL_NAME + ' 감시 중',
+                '감시는 정상 동작 중입니다. 현재 열린 날 ' + openCount + '건.');
 }
 
 // ───────── 잡다한 도우미 ─────────

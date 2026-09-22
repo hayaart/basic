@@ -72,15 +72,16 @@ function createRuntime(site, store) {
             return { getResponseCode: () => site.telegramStatus, getContentText: () => '{"ok":false}' };
           }
           const body = JSON.parse(opts.payload);
+          const bot = (url.match(/\/bot([^/]+)\//) || [])[1];
           const edit = url.indexOf('editMessageText') !== -1;
           if (edit && site.editFails) {
             return { getResponseCode: () => 400, getContentText: () => '{"ok":false,"description":"message to edit not found"}' };
           }
           // 고정해두는 살아있음 메시지는 알림이 아니라 따로 센다.
           if (edit || /이 메시지가 갱신됩니다/.test(body.text)) {
-            status.push({ edit: edit, id: body.message_id, text: body.text });
+            status.push({ edit: edit, id: body.message_id, text: body.text, bot: bot });
           } else {
-            sent.push({ channel: 'telegram', title: body.text.split('\n')[0], body: body.text });
+            sent.push({ channel: 'telegram', title: body.text.split('\n')[0], body: body.text, bot: bot });
           }
           site.nextMessageId = (site.nextMessageId || 100) + 1;
           return {
@@ -438,7 +439,7 @@ function post(text, opts) {
   site.requested = [];
   const { ctx, sent } = createRuntime(site, store);
   ctx.doPost({
-    parameter: { s: 'secret' in opts ? opts.secret : store.WEBHOOK_SECRET },
+    parameter: { s: 'secret' in opts ? opts.secret : store.WEBHOOK_SECRET, b: opts.b },
     postData: { contents: JSON.stringify({ message: { text: text, chat: { id: opts.chat || 1 } } }) },
   });
   return sent;
@@ -481,6 +482,55 @@ site.triggerOn = true;
 console.log('\n[대화] 도움말도 답한다');
 out = post('/help');
 check('명령 안내', out[0] && /상태/.test(out[0].body) && /확인/.test(out[0].body), out[0] && out[0].body);
+
+// ───────── 알림 봇 / 상태 봇 나누기 ─────────
+
+console.log('\n[두봇] 상태 봇을 따로 두면 살아있음 표시만 그쪽으로 간다');
+channelSetup({
+  TELEGRAM_TOKEN: 't', TELEGRAM_CHAT_ID: '1',
+  STATUS_TELEGRAM_TOKEN: 'st', STATUS_TELEGRAM_CHAT_ID: '2',
+});
+site.open = { '2027-05': [1] };
+out = tick();
+check('빈자리 알림은 알림 봇으로', out.length === 1 && out[0].bot === 't', JSON.stringify(out.map(p => p.bot)));
+check('상태 메시지는 상태 봇으로', lastStatus.length === 1 && lastStatus[0].bot === 'st',
+  JSON.stringify(lastStatus.map(p => p.bot)));
+check('상태 메시지 대화방을 기억', store.statusMsgChat === '2', store.statusMsgChat);
+
+console.log('\n[두봇] 하트비트도 상태 봇으로 간다');
+store.lastHeartbeatAt = String(Date.now() - 30 * 3600 * 1000);
+out = tick();
+check('하트비트 1통', out.length === 1 && /감시 중/.test(out[0].title), JSON.stringify(out.map(p => p.title)));
+check('상태 봇으로 감', out[0] && out[0].bot === 'st', out[0] && out[0].bot);
+
+console.log('\n[두봇] 실패 알림은 알림 봇으로 간다 (놓치면 안 되는 것이므로)');
+site.cookieOk = false;
+tick(); tick();
+out = tick();
+check('점검 알림이 알림 봇으로', out.some(p => /확인 실패/.test(p.title) && p.bot === 't'),
+  JSON.stringify(out.map(p => p.title + '@' + p.bot)));
+site.cookieOk = true;
+
+console.log('\n[두봇] 상태 봇을 바꾸면 상태 메시지를 새로 만든다');
+store.STATUS_TELEGRAM_CHAT_ID = '3';
+tick();
+check('새로 만듦', lastStatus.some(x => !x.edit), JSON.stringify(lastStatus.map(x => x.edit)));
+check('바뀐 대화방 기억', store.statusMsgChat === '3', store.statusMsgChat);
+
+console.log('\n[두봇] 물어보면 각자 받은 봇으로 답한다');
+channelSetup({
+  TELEGRAM_TOKEN: 't', TELEGRAM_CHAT_ID: '1',
+  STATUS_TELEGRAM_TOKEN: 'st', STATUS_TELEGRAM_CHAT_ID: '2',
+  WEBHOOK_SECRET: 'secret',
+});
+tick();
+out = post('상태', { b: 'main', chat: 1 });
+check('알림 봇에 물으면 알림 봇이 답함', out.length === 1 && out[0].bot === 't',
+  JSON.stringify(out.map(p => p.bot)));
+out = post('상태', { b: 'status', chat: 2 });
+check('상태 봇에 물으면 상태 봇이 답함', out.length === 1 && out[0].bot === 'st',
+  JSON.stringify(out.map(p => p.bot)));
+check('남의 대화방 번호로는 무응답', post('상태', { b: 'status', chat: 1 }).length === 0);
 
 console.log('\n' + (failures ? failures + '개 실패' : '전부 통과'));
 process.exit(failures ? 1 : 0);
