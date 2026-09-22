@@ -227,6 +227,34 @@ function resetState() {
   console.log('상태를 초기화했습니다.');
 }
 
+/** 지금 설정이 어떻게 돼 있는지 보여준다. 비밀값은 '설정됨' 으로만 찍는다. */
+function showSettings() {
+  var props = PropertiesService.getScriptProperties();
+  var months = prop_('MONTHS');
+  console.log('예식장: ' + HALL_CODE + ' = ' + HALL_NAME);
+  console.log('감시할 달: ' + (months ? months + ' (직접 지정)' :
+              '열린 달 전부 자동 (최대 ' + MAX_MONTHS_AHEAD + '달 앞까지)'));
+  console.log('알림 채널: ' + enabledChannels_().map(function (c) { return c.name; }).join(' → '));
+  console.log('  텔레그램: ' + (prop_('TELEGRAM_TOKEN') && prop_('TELEGRAM_CHAT_ID') ? '설정됨' : '없음'));
+  console.log('  ntfy: ' + (prop_('NTFY_TOPIC') ? '설정됨' : '없음'));
+  console.log('  이메일: ' + (prop_('EMAIL_TO') ? '설정됨' : '내 구글 계정'));
+  console.log('기억 중인 빈자리: ' + readOpenSet_(props).length + '건');
+  console.log('마지막 성공: ' + (props.getProperty('lastSuccessAt') || '없음') +
+              ' / 연속 실패: ' + (props.getProperty('failCount') || '0') + '회');
+  var last = props.getProperty('lastError');
+  if (last) console.log('마지막 오류: ' + last);
+  var triggers = ScriptApp.getProjectTriggers().filter(function (t) {
+    return t.getHandlerFunction() === 'checkOpenings';
+  });
+  console.log('자동 실행 트리거: ' + (triggers.length ? '켜짐' : '꺼짐 — createTrigger 를 실행하세요'));
+}
+
+/** 달 지정을 지우고 '열린 달 전부' 로 되돌린다. */
+function useAllMonths() {
+  PropertiesService.getScriptProperties().deleteProperty('MONTHS');
+  console.log('달 지정을 지웠습니다. 이제 예약을 받는 달을 전부 자동으로 감시합니다.');
+}
+
 /**
  * 예식장 코드를 찾아준다. 1~15 번을 한 달치씩 훑어서 결과를 찍는다.
  * 원하는 예식장 번호를 찾으면 스크립트 속성 HALL_CODE 에 넣으세요.

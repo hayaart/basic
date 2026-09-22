@@ -190,7 +190,8 @@
 |---|---|
 | 예식장 바꾸기 | 스크립트 속성 `HALL_CODE` · `HALL_NAME` (코드는 `findHallCodes` 로 찾기) |
 | 특정 달만 보기 | 스크립트 속성 `MONTHS` (`2027-05, 2027-06`) |
-| 다시 전체 자동으로 | `MONTHS` 속성 삭제 |
+| 다시 전체 자동으로 | **`useAllMonths` 실행** (속성을 직접 지워도 됨) |
+| 지금 설정 확인 | **`showSettings` 실행** |
 | 확인 주기 바꾸기 | `createTrigger` 안의 `everyMinutes(10)` 수정 후 다시 실행 |
 | 알림 기억 지우기 | `resetState` 실행 |
 | 잠시 멈추기 | 왼쪽 **⏰ 트리거** → ⋮ → **트리거 삭제** |
