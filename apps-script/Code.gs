@@ -493,6 +493,66 @@ function setupTelegramCommands() {
   console.log('텔레그램에서 봇에게 "상태" 라고 보내보세요.');
 }
 
+/**
+ * 메시지 응답이 왜 안 되는지 알아본다.
+ * 텔레그램이 웹앱을 부르다 실패하면 그 이유를 기억하고 있으므로, 그걸 그대로 꺼내 본다.
+ */
+function checkTelegramCommands() {
+  var url = prop_('WEBAPP_URL');
+  var secret = prop_('WEBHOOK_SECRET');
+  console.log('WEBAPP_URL: ' + (url || '❌ 없음 — 웹앱을 배포하고 주소를 넣으세요'));
+  console.log('비밀값: ' + (secret ? '있음' : '❌ 없음 — setupTelegramCommands 를 실행하세요'));
+  if (url && url.indexOf('/exec') === -1) {
+    console.log('⚠️ 주소가 /exec 으로 끝나야 합니다. /dev 주소는 나만 열 수 있어서 안 됩니다.');
+  }
+
+  if (url) {
+    // 텔레그램이 부르는 것과 같은 방식으로 우리가 직접 불러 본다.
+    try {
+      var res = UrlFetchApp.fetch(url + (url.indexOf('?') === -1 ? '?' : '&') + 's=test', {
+        method: 'post', contentType: 'application/json', payload: '{}',
+        muteHttpExceptions: true
+      });
+      var code = res.getResponseCode();
+      console.log('웹앱 응답 코드: ' + code +
+                  (code === 200 ? ' ✅ 잘 열립니다'
+                                : ' ❌ 배포할 때 액세스 권한을 "모든 사용자" 로 하셨는지 확인하세요'));
+    } catch (e) {
+      console.log('웹앱을 부르지 못했습니다: ' + e.message);
+    }
+  }
+
+  ['main', 'status'].forEach(function (which) {
+    if (which === 'status' && !hasStatusBot_()) return;
+    if (!hasTelegram_(which)) return;
+    var label = which === 'main' ? '알림 봇' : '상태 봇';
+    var info;
+    try { info = telegramApi_('getWebhookInfo', {}, which); }
+    catch (e) { console.log(label + ': 물어보지 못했습니다 — ' + e.message); return; }
+
+    var r = (info && info.result) || {};
+    console.log('── ' + label + ' ──');
+    console.log('  등록된 주소: ' + (r.url || '❌ 없음 — setupTelegramCommands 를 실행하세요'));
+    console.log('  받기로 한 것: ' + ((r.allowed_updates || []).join(', ') || '전부'));
+    console.log('  밀린 메시지: ' + (r.pending_update_count || 0) + '건');
+    if (r.last_error_message) {
+      console.log('  ❌ 마지막 실패: ' + r.last_error_message);
+      if (r.last_error_date) {
+        console.log('     (' + Utilities.formatDate(new Date(r.last_error_date * 1000),
+                    'Asia/Seoul', 'M월 d일 HH:mm') + ')');
+      }
+    } else if (r.url) {
+      console.log('  ✅ 실패 기록 없음');
+    }
+    if (r.url && r.url.indexOf('b=' + which) === -1) {
+      console.log('  ⚠️ 주소에 b=' + which + ' 가 없습니다. setupTelegramCommands 를 다시 실행하세요.');
+    }
+    if ((r.allowed_updates || []).length && (r.allowed_updates || []).indexOf('callback_query') === -1) {
+      console.log('  ⚠️ 버튼 누름을 안 받고 있습니다. 새 코드로 setupTelegramCommands 를 다시 실행하세요.');
+    }
+  });
+}
+
 /** 메시지 응답을 끈다. (findTelegramChatId 를 다시 쓰려면 꺼야 한다) */
 function removeTelegramCommands() {
   ['main', 'status'].forEach(function (which) {
