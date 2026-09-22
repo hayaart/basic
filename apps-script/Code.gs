@@ -77,6 +77,7 @@ function runCheck_() {
   if (scan.fatal || (scan.checked && scan.failed.length === scan.checked)) {
     console.warn('전체 조회 실패: ' + scan.errors.join(' | '));
     recordFailure_(props, scan.errors.join(' | '));
+    updateStatusMessage_(props, scan, prev);
     return;
   }
 
@@ -112,6 +113,8 @@ function runCheck_() {
     recordSuccess_(props);
     maybeHeartbeat_(props, openNow.length);
   }
+
+  updateStatusMessage_(props, scan, openNow);
 
   console.log('확인한 달 ' + scan.checked + '개 (' + Object.keys(scan.ok).join(', ') + ')' +
               ' / 현재 열린 날: ' + (openNow.length ? openNow.join(', ') : '없음') +
@@ -222,7 +225,7 @@ function createTrigger() {
 /** 기억해 둔 상태를 지운다. 다음 실행에서 현재 열린 날을 전부 새 빈자리로 다시 알립니다. */
 function resetState() {
   var props = PropertiesService.getScriptProperties();
-  ['openSet', 'hallCode', 'failCount', 'failAlerted', 'lastError', 'lastSuccessAt', 'lastHeartbeatAt']
+  ['openSet', 'hallCode', 'statusMsgId', 'failCount', 'failAlerted', 'lastError', 'lastSuccessAt', 'lastHeartbeatAt']
     .forEach(function (k) { props.deleteProperty(k); });
   console.log('상태를 초기화했습니다.');
 }
@@ -448,21 +451,93 @@ function enabledChannels_() {
   return channels;
 }
 
-function sendTelegram_(title, message) {
-  var url = 'https://api.telegram.org/bot' + prop_('TELEGRAM_TOKEN') + '/sendMessage';
-  var res = UrlFetchApp.fetch(url, {
-    method: 'post',
-    contentType: 'application/json',
-    payload: JSON.stringify({
-      chat_id: prop_('TELEGRAM_CHAT_ID'),
-      text: title + '\n\n' + message + '\n\n' + PAGE_URL,
-      disable_web_page_preview: true
-    }),
-    muteHttpExceptions: true
-  });
+function telegramApi_(method, payload) {
+  var res = UrlFetchApp.fetch(
+    'https://api.telegram.org/bot' + prop_('TELEGRAM_TOKEN') + '/' + method,
+    {
+      method: 'post',
+      contentType: 'application/json',
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    });
   var code = res.getResponseCode();
-  if (code >= 200 && code < 300) return true;
-  throw new Error('HTTP ' + code + ' ' + res.getContentText().slice(0, 200));
+  var text = res.getContentText();
+  if (code < 200 || code >= 300) throw new Error('HTTP ' + code + ' ' + text.slice(0, 200));
+  return JSON.parse(text);
+}
+
+function sendTelegram_(title, message) {
+  telegramApi_('sendMessage', {
+    chat_id: prop_('TELEGRAM_CHAT_ID'),
+    text: title + '\n\n' + message + '\n\n' + PAGE_URL,
+    disable_web_page_preview: true
+  });
+  return true;
+}
+
+function hasTelegram_() {
+  return !!(prop_('TELEGRAM_TOKEN') && prop_('TELEGRAM_CHAT_ID'));
+}
+
+/**
+ * 텔레그램에 '살아있음' 메시지를 하나 두고 매 회차 고쳐 쓴다.
+ *
+ * 알림이 안 오는 상태가 '빈자리가 없어서'인지 '감시가 멈춰서'인지 폰에서 바로 구분하려면,
+ * 아무 일이 없을 때도 눈에 보이는 무언가가 있어야 한다. 고쳐 쓰기라 알림은 울리지 않는다.
+ */
+function updateStatusMessage_(props, scan, openNow) {
+  if (!hasTelegram_()) return;
+  var text = buildStatusText_(scan, openNow);
+  var id = props.getProperty('statusMsgId');
+
+  if (id) {
+    try {
+      telegramApi_('editMessageText', {
+        chat_id: prop_('TELEGRAM_CHAT_ID'), message_id: Number(id),
+        text: text, disable_web_page_preview: true
+      });
+      return;
+    } catch (e) {
+      // 메시지를 지웠거나 너무 오래됐을 수 있다. 아래에서 새로 만든다.
+      console.log('상태 메시지 갱신 실패, 새로 만듭니다: ' + e.message);
+    }
+  }
+  try {
+    var res = telegramApi_('sendMessage', {
+      chat_id: prop_('TELEGRAM_CHAT_ID'), text: text,
+      disable_web_page_preview: true, disable_notification: true
+    });
+    if (res && res.result && res.result.message_id) {
+      props.setProperty('statusMsgId', String(res.result.message_id));
+    }
+  } catch (e) {
+    console.log('상태 메시지 생성 실패: ' + e.message);
+  }
+}
+
+function buildStatusText_(scan, openNow) {
+  var allFailed = scan.fatal || (scan.checked && scan.failed.length === scan.checked);
+  var lines = [];
+  lines.push(allFailed ? '🔴 감시 멈춤 — 확인이 안 되고 있습니다'
+                       : (scan.failed.length ? '🟡 일부만 확인됨' : '🟢 감시 중'));
+  lines.push('');
+  lines.push('예식장: ' + HALL_NAME);
+  lines.push('마지막 확인: ' + Utilities.formatDate(new Date(), 'Asia/Seoul', 'M월 d일 (EEE) HH:mm'));
+  if (!allFailed) {
+    lines.push('확인한 달: ' + Object.keys(scan.ok).length + '개' +
+               (scan.failed.length ? ' (' + scan.failed.length + '개 실패)' : ''));
+  }
+  lines.push('현재 빈자리: ' + (openNow.length ? openNow.length + '건' : '없음'));
+  if (openNow.length) {
+    lines.push('  ' + openNow.slice(0, 10).join(', ') + (openNow.length > 10 ? ' 외' : ''));
+  }
+  if (allFailed) {
+    lines.push('');
+    lines.push('원인: ' + String(scan.errors.join(' | ')).slice(0, 200));
+  }
+  lines.push('');
+  lines.push('10분마다 이 메시지가 갱신됩니다. 시각이 안 바뀌면 멈춘 것입니다.');
+  return lines.join('\n');
 }
 
 function sendNtfy_(title, message, priority) {

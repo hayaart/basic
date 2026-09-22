@@ -23,6 +23,7 @@ const CODE = fs.readFileSync(path.join(__dirname, '..', 'Code.gs'), 'utf8');
 /** 가짜 사이트 + 가짜 구글 런타임. 보낸 알림을 모아서 돌려준다. */
 function createRuntime(site, store) {
   const sent = [];
+  const status = [];
   const ctx = {
     console: { log() {}, warn() {}, error() {} },
     PropertiesService: {
@@ -65,8 +66,21 @@ function createRuntime(site, store) {
             return { getResponseCode: () => site.telegramStatus, getContentText: () => '{"ok":false}' };
           }
           const body = JSON.parse(opts.payload);
-          sent.push({ channel: 'telegram', title: body.text.split('\n')[0], body: body.text });
-          return { getResponseCode: () => 200, getContentText: () => '{"ok":true}' };
+          const edit = url.indexOf('editMessageText') !== -1;
+          if (edit && site.editFails) {
+            return { getResponseCode: () => 400, getContentText: () => '{"ok":false,"description":"message to edit not found"}' };
+          }
+          // 살아있음 메시지는 알림이 아니라 따로 센다.
+          if (/^[🟢🟡🔴]/.test(body.text)) {
+            status.push({ edit: edit, id: body.message_id, text: body.text });
+          } else {
+            sent.push({ channel: 'telegram', title: body.text.split('\n')[0], body: body.text });
+          }
+          site.nextMessageId = (site.nextMessageId || 100) + 1;
+          return {
+            getResponseCode: () => 200,
+            getContentText: () => JSON.stringify({ ok: true, result: { message_id: site.nextMessageId } }),
+          };
         }
         if (url.indexOf('ntfy') !== -1) {
           if (site.ntfyStatus !== 200) {
@@ -101,7 +115,7 @@ function createRuntime(site, store) {
   };
   vm.createContext(ctx);
   vm.runInContext(CODE, ctx);
-  return { ctx, sent };
+  return { ctx, sent, status };
 }
 
 /**
@@ -153,10 +167,12 @@ const TARGET_MONTHS = '2027-05, 2027-06, 2027-09, 2027-10, 2027-11';
 const store = { NTFY_TOPIC: 'test-topic', MONTHS: TARGET_MONTHS };
 
 /** 한 회차를 돌리고 그동안 나간 알림을 돌려준다. */
+let lastStatus = [];
 function tick() {
   site.requested = [];
-  const { ctx, sent } = createRuntime(site, store);
+  const { ctx, sent, status } = createRuntime(site, store);
   ctx.checkOpenings();
+  lastStatus = status;
   return sent;
 }
 
@@ -371,6 +387,42 @@ site.failMonths = [keepMonth];
 tick();
 check('지나간 달은 버림', store.openSet.indexOf(addMonths(thisMonth, -3)) === -1, store.openSet);
 check('확인 못 한 달은 지킴', store.openSet.indexOf(keepMonth) !== -1, store.openSet);
+
+// ───────── 텔레그램 살아있음 메시지 ─────────
+
+console.log('\n[상태메시지] 처음엔 만들고, 그 다음부터는 같은 메시지를 고쳐 쓴다');
+channelSetup({ TELEGRAM_TOKEN: 't', TELEGRAM_CHAT_ID: '1' });
+tick();
+check('처음엔 새로 만듦', lastStatus.length === 1 && !lastStatus[0].edit, JSON.stringify(lastStatus));
+check('메시지 id 를 기억', !!store.statusMsgId, store.statusMsgId);
+check('감시 중으로 표시', /^🟢/.test(lastStatus[0].text), lastStatus[0] && lastStatus[0].text.split('\n')[0]);
+
+const firstId = store.statusMsgId;
+tick();
+check('다음부터는 고쳐 씀', lastStatus.length === 1 && lastStatus[0].edit === true, JSON.stringify(lastStatus));
+check('같은 메시지를 유지', store.statusMsgId === firstId, store.statusMsgId);
+
+console.log('\n[상태메시지] 확인이 안 되면 빨간불로 바뀐다');
+site.cookieOk = false;
+tick();
+check('멈춤으로 표시', /^🔴/.test(lastStatus[0].text), lastStatus[0] && lastStatus[0].text.split('\n')[0]);
+check('원인도 적힘', /세션 쿠키/.test(lastStatus[0].text), lastStatus[0] && lastStatus[0].text);
+site.cookieOk = true;
+
+console.log('\n[상태메시지] 메시지를 지웠으면 새로 만든다');
+channelSetup({ TELEGRAM_TOKEN: 't', TELEGRAM_CHAT_ID: '1' });
+tick();
+const before = store.statusMsgId;
+site.editFails = true;
+tick();
+check('고쳐쓰기 실패 시 새로 만듦', lastStatus.some(x => !x.edit), JSON.stringify(lastStatus.map(x => x.edit)));
+check('새 id 로 교체', store.statusMsgId !== before, store.statusMsgId);
+site.editFails = false;
+
+console.log('\n[상태메시지] 텔레그램을 안 쓰면 아무것도 안 한다');
+channelSetup({ NTFY_TOPIC: 'test-topic' });
+tick();
+check('상태 메시지 없음', lastStatus.length === 0, JSON.stringify(lastStatus));
 
 console.log('\n' + (failures ? failures + '개 실패' : '전부 통과'));
 process.exit(failures ? 1 : 0);
