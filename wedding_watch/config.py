@@ -189,13 +189,17 @@ class SourceConfig:
     api: ApiSourceConfig = field(default_factory=ApiSourceConfig)
     browser: BrowserSourceConfig = field(default_factory=BrowserSourceConfig)
 
-    def validate(self) -> None:
+    def validate(self, require_login: bool = True) -> None:
         if self.mode not in {"api", "browser"}:
             raise ConfigError(f"source.mode 는 api 또는 browser 여야 합니다: {self.mode}")
         if self.mode == "api":
             self.api.validate()
         else:
             self.browser.validate()
+        if not require_login:
+            # `test-public` 은 '로그인이 필요한가'를 확인하는 명령이므로,
+            # 아이디/비밀번호가 없다고 막으면 안 된다.
+            return
         self.login.validate()
         if self.login.enabled:
             if self.mode == "api" and not self.login.url:
@@ -217,7 +221,7 @@ class Config:
     ntfy: NtfyConfig = field(default_factory=NtfyConfig)
     state_file: str = "state/seen.json"
 
-    def validate(self, require_source: bool = True) -> None:
+    def validate(self, require_source: bool = True, require_login: bool = True) -> None:
         """require_source=False 면 조회 설정(source)은 검사하지 않는다.
 
         `login`/`discover` 는 source 를 '채우기 위해' 실행하는 명령이라,
@@ -227,7 +231,7 @@ class Config:
         self.poll.validate()
         self.ntfy.validate()
         if require_source:
-            self.source.validate()
+            self.source.validate(require_login=require_login)
 
 
 def _build(cls: type, data: Any):
@@ -293,7 +297,10 @@ def apply_env_overrides(config: Config, environ: dict[str, str] | None = None) -
 
 
 def load_config(
-    path: str | Path, environ: dict[str, str] | None = None, require_source: bool = True
+    path: str | Path,
+    environ: dict[str, str] | None = None,
+    require_source: bool = True,
+    require_login: bool = True,
 ) -> Config:
     path = Path(path)
     if not path.exists():
@@ -304,5 +311,5 @@ def load_config(
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     config = _build(Config, raw)
     apply_env_overrides(config, environ)
-    config.validate(require_source=require_source)
+    config.validate(require_source=require_source, require_login=require_login)
     return config

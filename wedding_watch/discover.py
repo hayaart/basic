@@ -200,6 +200,9 @@ def _apply(config_path, suggestion, login_form, hall_code: str) -> None:
     print()
     print(" 이제 이 명령으로 잘 되는지 확인하세요:")
     print("   wedding-watch check --dry-run")
+    print()
+    print(" 로그인이 정말 필요한지 궁금하다면:")
+    print("   wedding-watch test-public")
     print("=" * 64)
 
 

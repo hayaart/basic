@@ -69,6 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("test-notify", help="ntfy 설정이 맞는지 테스트 알림 발송")
     sub.add_parser("test-login", help="자동 재로그인 설정이 맞는지 확인")
+    sub.add_parser("test-public", help="로그인 없이도 조회되는지 실제로 확인")
     sub.add_parser("state", help="현재 기억 중인 빈자리 상태 출력")
     return parser
 
@@ -156,6 +157,23 @@ def cmd_test_login(config: Config) -> int:
     return 0
 
 
+def cmd_test_public(config: Config) -> int:
+    from .probe import probe_without_login
+
+    print("저장된 쿠키를 모두 빼고 조회를 시도합니다...\n")
+    result = probe_without_login(config)
+    print(result.summary())
+    if result.inconclusive:
+        print("\n브라우저 시크릿 창으로 예약 달력을 열어 직접 확인해 보세요.")
+        return 1
+    if result.login_required:
+        print("\n→ 로그인 설정을 유지하세요. (source.login.enabled: true 권장)")
+        return 1
+    print("\n→ config.yaml 에서 source.login.enabled 를 false 로 두셔도 됩니다.")
+    print("   아이디/비밀번호 없이 감시할 수 있습니다.")
+    return 0
+
+
 def cmd_state(config: Config) -> int:
     state = SeenState(config.state_file)
     print(f"상태 파일: {state.path}")
@@ -170,7 +188,7 @@ def cmd_state(config: Config) -> int:
 
 
 # 조회 설정(source)이 반드시 채워져 있어야 하는 명령들.
-_NEEDS_SOURCE = {"run", "check", "test-login"}
+_NEEDS_SOURCE = {"run", "check", "test-login", "test-public"}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -184,7 +202,12 @@ def main(argv: list[str] | None = None) -> int:
         return run_setup(args.config, args.example, ".env")
 
     try:
-        config = load_config(args.config, require_source=args.command in _NEEDS_SOURCE)
+        config = load_config(
+            args.config,
+            require_source=args.command in _NEEDS_SOURCE,
+            # 로그인이 필요한지 '확인하는' 명령이므로 아이디/비밀번호를 요구하지 않는다.
+            require_login=args.command != "test-public",
+        )
     except ConfigError as exc:
         print(f"설정 오류: {exc}", file=sys.stderr)
         if not Path(args.config).exists():
@@ -203,6 +226,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_test_notify(config)
     if args.command == "test-login":
         return cmd_test_login(config)
+    if args.command == "test-public":
+        return cmd_test_public(config)
     if args.command == "state":
         return cmd_state(config)
     raise AssertionError(f"처리되지 않은 명령: {args.command}")

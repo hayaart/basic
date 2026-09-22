@@ -145,6 +145,7 @@ wedding-watch run                # 10분마다 계속 확인 (Ctrl+C 로 종료)
 | `wedding-watch discover` | 실제 API 요청 캡처 → 설정 후보 생성 |
 | `wedding-watch test-notify` | ntfy 설정 테스트 |
 | `wedding-watch test-login` | 자동 재로그인 설정 테스트 |
+| `wedding-watch test-public` | 로그인 없이도 조회되는지 실제로 확인 |
 | `wedding-watch state` | 지금 기억 중인 빈자리 목록 |
 
 ## 설정 항목
@@ -164,6 +165,20 @@ wedding-watch run                # 10분마다 계속 확인 (Ctrl+C 로 종료)
 
 환경변수로도 덮어쓸 수 있습니다: `WW_NTFY_TOPIC`, `WW_NTFY_TOKEN`, `WW_HALL_CODE`,
 `WW_MONTHS`, `WW_INTERVAL_SECONDS`, `WW_SOURCE_MODE` …
+
+## 로그인이 정말 필요한가?
+
+결혼도움방은 회원 전용 사이트지만, 달력 API 자체가 인증을 확인하는지는 **측정해 봐야** 압니다.
+
+```bash
+wedding-watch test-public
+```
+
+저장된 쿠키와 자동 로그인을 모두 끈 채로 같은 요청을 보내 봅니다.
+
+- **로그인 없이도 조회됩니다** → `source.login.enabled` 를 `false` 로 두세요. 아이디/비밀번호가 아예 필요 없습니다.
+- **로그인이 필요합니다** → 아래 자동 재로그인을 켜세요.
+- **판단 불가** → 서버 오류 등으로 구분이 안 된 경우입니다. 브라우저 시크릿 창으로 직접 확인해 보세요.
 
 ## 자동 재로그인 (권장)
 
@@ -272,6 +287,7 @@ wedding_watch/
   watcher.py      감시 루프: 조회 → 비교 → 알림
   discover.py     로그인 세션 저장 + API/로그인폼 캡처 및 분석
   autoconfig.py   캡처 결과를 config.yaml 에 자동 반영
+  probe.py        로그인이 실제로 필요한지 측정
   setup_wizard.py 대화형 초기 설정
   adapters/
     api.py        내부 JSON API 직접 호출 (기본) + 자동 재로그인
