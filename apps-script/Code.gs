@@ -13,6 +13,8 @@
  *                      목록에 없으면 findHallCodes 를 실행해 찾으세요.
  *    HALL_NAME         알림에 쓸 이름
  *    MONTHS            노리는 월. 쉼표로 구분: 2027-05, 2027-06
+ *                      비워두면 예약을 받는 달을 스스로 찾아 전부 감시합니다.
+ *    MAX_MONTHS_AHEAD  자동 탐색 시 몇 달 앞까지 볼지. 기본 24
  *
  *  알림은 [텔레그램 → ntfy → 이메일] 순으로 시도하고, 하나라도 성공하면 멈춥니다.
  *  이메일은 설정이 없어도 항상 마지막 보루로 동작합니다.
@@ -21,8 +23,9 @@
 // 아래는 기본값이고, 스크립트 속성에 같은 이름을 넣으면 그쪽이 우선합니다.
 var HALL_CODE = prop_('HALL_CODE') || '1';    // 1 서초사옥 · 3 삼성E&A · 5 삼성금융연수원
 var HALL_NAME = prop_('HALL_NAME') || '서초사옥';
-var MONTHS    = parseMonths_(prop_('MONTHS')) ||
-                ['2027-05', '2027-06', '2027-09', '2027-10', '2027-11'];
+// 월을 지정하지 않으면(기본) 예약을 받는 달을 스스로 찾아 전부 감시한다.
+var FIXED_MONTHS = parseMonths_(prop_('MONTHS'));
+var MAX_MONTHS_AHEAD = Number(prop_('MAX_MONTHS_AHEAD')) || 24;
 
 /*************************************************************
  *  ▲▲▲ 여기 위쪽만 신경 쓰면 됩니다. 아래는 안 건드려도 돼요 ▲▲▲
@@ -40,6 +43,9 @@ var GAP_MS    = 1200;          // 달과 달 사이 간격
 // 조회된 날짜의 대부분이 '열림'으로 보이면 파싱이 깨졌을 수 있다. 판단 기준.
 var SUSPICIOUS_MIN_DAYS  = 8;
 var SUSPICIOUS_RATIO     = 0.8;
+
+// 자동 탐색: 예약을 아예 안 받는 달이 이만큼 연달아 나오면 거기가 끝이라고 본다.
+var STOP_AFTER_EMPTY = 3;
 
 // ───────────────────────────────────────────────────────────
 //  트리거에서 10분마다 자동 실행되는 함수
@@ -66,16 +72,21 @@ function runCheck_() {
 
   var scan = scanMonths_();
 
-  // 모든 달이 실패했다면 상태를 건드리지 않는다.
+  // 한 달도 확인하지 못했다면 상태를 건드리지 않는다.
   // (여기서 openSet 을 비우면 다음에 성공했을 때 전부 '새 빈자리'로 다시 알림이 간다.)
-  if (scan.failed.length === MONTHS.length) {
+  if (scan.fatal || (scan.checked && scan.failed.length === scan.checked)) {
     console.warn('전체 조회 실패: ' + scan.errors.join(' | '));
     recordFailure_(props, scan.errors.join(' | '));
     return;
   }
 
-  // 실패한 달은 이전 상태를 이어받는다 → 일시적 실패가 중복 알림으로 번지지 않게.
-  var carried = prev.filter(function (d) { return scan.failed.indexOf(d.slice(0, 7)) !== -1; });
+  // 이번에 확인하지 못한 달은 이전 상태를 이어받는다 → 일시적 실패가 중복 알림으로 번지지 않게.
+  // 이미 지나간 달은 그대로 버린다.
+  var thisMonth = currentMonth_();
+  var carried = prev.filter(function (d) {
+    var ym = d.slice(0, 7);
+    return !scan.ok[ym] && ym >= thisMonth;
+  });
   var openNow = dedupeSorted_(scan.open.concat(carried));
 
   var newly = openNow.filter(function (d) { return !prevSet[d]; });
@@ -102,37 +113,69 @@ function runCheck_() {
     maybeHeartbeat_(props, openNow.length);
   }
 
-  console.log('현재 열린 날: ' + (openNow.length ? openNow.join(', ') : '없음') +
+  console.log('확인한 달 ' + scan.checked + '개 (' + Object.keys(scan.ok).join(', ') + ')' +
+              ' / 현재 열린 날: ' + (openNow.length ? openNow.join(', ') : '없음') +
               ' / 새로 알린 날: ' + (newly.length ? newly.join(', ') : '없음') +
               (scan.failed.length ? ' / 조회 실패한 달: ' + scan.failed.join(', ') : ''));
 }
 
-/** 대상 월을 모두 조회한다. 일부가 실패해도 나머지는 진행한다. */
+/**
+ * 대상 월을 모두 조회한다. 일부가 실패해도 나머지는 진행한다.
+ *
+ * MONTHS 를 지정했으면 그 달만 본다. 지정하지 않았으면 이번 달부터 앞으로 가면서,
+ * 예약을 아예 안 받는 달이 연달아 나오는 지점을 예약 가능 구간의 끝으로 보고 멈춘다.
+ */
 function scanMonths_() {
-  var result = { open: [], total: 0, failed: [], errors: [] };
+  var result = { open: [], total: 0, failed: [], errors: [], ok: {}, checked: 0, fatal: false };
 
   var cookie;
   try {
     cookie = getCookie_();
   } catch (e) {
     // 쿠키를 못 받으면 어느 달도 조회할 수 없다.
-    result.failed = MONTHS.slice();
+    result.fatal = true;
     result.errors.push(e.message);
     return result;
   }
 
-  MONTHS.forEach(function (ym, i) {
+  if (FIXED_MONTHS) {
+    FIXED_MONTHS.forEach(function (ym, i) {
+      if (i) Utilities.sleep(GAP_MS);
+      checkMonth_(cookie, ym, result);
+    });
+    return result;
+  }
+
+  var ym = currentMonth_();
+  var empty = 0;
+  for (var i = 0; i < MAX_MONTHS_AHEAD && empty < STOP_AFTER_EMPTY; i++) {
     if (i) Utilities.sleep(GAP_MS);
-    try {
-      var month = fetchOpenDays_(cookie, ym);
-      result.open = result.open.concat(month.open);
-      result.total += month.total;
-    } catch (e) {
-      result.failed.push(ym);
-      result.errors.push(ym + ': ' + e.message);
+    var before = result.total;
+    checkMonth_(cookie, ym, result);
+    if (!result.ok[ym]) {
+      // 조회 실패는 '빈 달'이 아니다. 여기서 멈추면 뒤쪽 달을 통째로 놓친다.
+    } else if (result.total === before) {
+      empty++;
+    } else {
+      empty = 0;
     }
-  });
+    ym = addMonths_(ym, 1);
+  }
   return result;
+}
+
+/** 한 달을 조회해 결과에 합친다. */
+function checkMonth_(cookie, ym, result) {
+  result.checked++;
+  try {
+    var month = fetchOpenDays_(cookie, ym);
+    result.open = result.open.concat(month.open);
+    result.total += month.total;
+    result.ok[ym] = true;
+  } catch (e) {
+    result.failed.push(ym);
+    result.errors.push(ym + ': ' + e.message);
+  }
 }
 
 /** 조회된 날짜의 대부분이 열림으로 보이는가? (파싱이 깨졌을 때의 신호) */
@@ -160,16 +203,11 @@ function sendTestPush() {
     return;
   }
 
-  MONTHS.forEach(function (ym, i) {
-    if (i) Utilities.sleep(GAP_MS);
-    try {
-      var month = fetchOpenDays_(cookie, ym, true);
-      console.log(ym + ' → 조회된 날 ' + month.total + '개 중 열린 날: ' +
-                  (month.open.length ? month.open.join(', ') : '없음(전부 마감)'));
-    } catch (e) {
-      console.log(ym + ' → 읽기 실패: ' + e.message);
-    }
-  });
+  var scan = scanMonths_();
+  Object.keys(scan.ok).forEach(function (ym) { console.log('  확인한 달: ' + ym); });
+  console.log('확인한 달 ' + scan.checked + '개 / 열린 날 ' + scan.open.length + '개' +
+              (scan.open.length ? ': ' + scan.open.join(', ') : ''));
+  if (scan.failed.length) console.log('조회 실패: ' + scan.errors.join(' | '));
 }
 
 /** 10분마다 실행되는 트리거를 만든다 (이미 있으면 새로 만든다). */
@@ -194,7 +232,7 @@ function resetState() {
  * 원하는 예식장 번호를 찾으면 스크립트 속성 HALL_CODE 에 넣으세요.
  */
 function findHallCodes() {
-  var ym = MONTHS[0];
+  var ym = (FIXED_MONTHS && FIXED_MONTHS[0]) || currentMonth_();
   var cookie;
   try { cookie = getCookie_(); }
   catch (e) { console.log('세션 쿠키 발급 실패 → ' + e.message); return; }
@@ -483,6 +521,20 @@ function maybeHeartbeat_(props, openCount) {
 function prop_(key) {
   var value = PropertiesService.getScriptProperties().getProperty(key);
   return value ? String(value).trim() : '';
+}
+
+/** 서울 기준 이번 달 ('2026-09'). */
+function currentMonth_() {
+  return Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM');
+}
+
+/** '2026-11' 에서 n 달 뒤. */
+function addMonths_(ym, n) {
+  var y = parseInt(ym.slice(0, 4), 10);
+  var m = parseInt(ym.slice(5, 7), 10) - 1 + n;
+  y += Math.floor(m / 12);
+  m = ((m % 12) + 12) % 12;
+  return y + '-' + ('0' + (m + 1)).slice(-2);
 }
 
 /** 쉼표로 구분된 '2027-05, 2027-06' 을 배열로. 쓸 수 있는 값이 없으면 null. */

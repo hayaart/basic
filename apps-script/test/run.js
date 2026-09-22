@@ -42,7 +42,19 @@ function createRuntime(site, store) {
     },
     Utilities: {
       sleep() {},
-      formatDate: () => '20260101',
+      // 실제 Utilities.formatDate 처럼 동작해야 '이번 달' 계산을 검증할 수 있다.
+      formatDate: (date, tz, fmt) => {
+        const d = new Date(date);
+        const pad = (n, w) => String(n).padStart(w, '0');
+        return fmt
+          .replace('yyyy', d.getUTCFullYear())
+          .replace('MM', pad(d.getUTCMonth() + 1, 2))
+          .replace('dd', pad(d.getUTCDate(), 2))
+          .replace('HH', pad(d.getUTCHours(), 2))
+          .replace('mm', pad(d.getUTCMinutes(), 2))
+          .replace('ss', pad(d.getUTCSeconds(), 2))
+          .replace('SSS', pad(d.getUTCMilliseconds(), 3));
+      },
       base64Encode: s => Buffer.from(s, 'utf8').toString('base64'),
       Charset: { UTF_8: 'utf8' },
     },
@@ -99,6 +111,10 @@ function createRuntime(site, store) {
 function buildRs(site, ym) {
   const [y, m] = ym.split('-').map(Number);
   const days = {};
+  // 예약을 아직/이미 안 받는 달은 날짜 목록 자체가 비어서 온다.
+  if (site.window && (ym < site.window.from || ym > site.window.to)) {
+    return JSON.stringify({ days }).replace(/"/g, '&quot;');
+  }
   for (let d = 1; d <= new Date(y, m, 0).getDate(); d++) {
     const wd = new Date(y, m - 1, d).getDay();
     if (wd === 0 || wd === 6) days[String(d)] = { closed: 'true' };
@@ -133,7 +149,8 @@ const site = {
   emailOk: true,
   requested: [],
 };
-const store = { NTFY_TOPIC: 'test-topic' };
+const TARGET_MONTHS = '2027-05, 2027-06, 2027-09, 2027-10, 2027-11';
+const store = { NTFY_TOPIC: 'test-topic', MONTHS: TARGET_MONTHS };
 
 /** 한 회차를 돌리고 그동안 나간 알림을 돌려준다. */
 function tick() {
@@ -195,6 +212,7 @@ check('그 다음 회차는 조용함', tick().length === 0);
 console.log('\n[상태] 조회된 날이 거의 전부 열림이면 — 막지 않고 경고로 알린다');
 clearState();
 store.NTFY_TOPIC = 'test-topic';
+store.MONTHS = TARGET_MONTHS;
 site.failMonths = [];
 site.open = {};
 ['2027-05', '2027-06', '2027-09', '2027-10', '2027-11'].forEach(ym => {
@@ -210,6 +228,7 @@ check('상태를 저장해 한 번만 알림', tick().length === 0);
 
 function channelSetup(props) {
   clearState();
+  store.MONTHS = TARGET_MONTHS;
   Object.keys(props).forEach(k => { store[k] = props[k]; });
   site.failMonths = [];
   site.open = { '2027-05': [1] };
@@ -304,6 +323,54 @@ settingsSetup({ HALL_CODE: '9', HALL_NAME: '서초사옥', MONTHS: '2027-05' });
 site.open = { '2027-05': [1] };
 out = tick();
 check('제목에 서초사옥', out[0] && /서초사옥/.test(out[0].title), out[0] && out[0].title);
+
+// ───────── 열린 달 자동 탐색 ─────────
+
+function addMonths(ym, n) {
+  const y = Number(ym.slice(0, 4));
+  const m = Number(ym.slice(5, 7)) - 1 + n;
+  return (y + Math.floor(m / 12)) + '-' + String((((m % 12) + 12) % 12) + 1).padStart(2, '0');
+}
+
+const thisMonth = new Date().toISOString().slice(0, 7);
+const lastOpen = addMonths(thisMonth, 14);
+
+console.log('\n[자동] MONTHS 를 안 주면 이번 달부터 훑어서 열린 달을 스스로 찾는다');
+settingsSetup({});
+site.window = { from: thisMonth, to: lastOpen };
+site.open = {};
+site.open[addMonths(thisMonth, 3)] = [1];
+out = tick();
+check('이번 달부터 시작', site.requested[0].split('/')[1] === thisMonth, site.requested[0]);
+check('예약 받는 마지막 달까지 확인',
+  site.requested.some(r => r.endsWith('/' + lastOpen)), JSON.stringify(site.requested.slice(-5)));
+check('빈 달 3개를 더 보고 멈춤',
+  site.requested[site.requested.length - 1].endsWith('/' + addMonths(lastOpen, 3)),
+  site.requested[site.requested.length - 1]);
+check('찾아낸 빈자리를 알린다', out.length === 1 && /빈자리/.test(out[0].title), JSON.stringify(out.map(p => p.title)));
+
+console.log('\n[자동] 중간에 조회가 실패해도 거기서 멈추지 않는다');
+settingsSetup({});
+site.window = { from: thisMonth, to: lastOpen };
+site.open = {};
+site.failMonths = [addMonths(thisMonth, 1), addMonths(thisMonth, 2), addMonths(thisMonth, 3)];
+tick();
+check('실패를 빈 달로 치지 않고 끝까지 훑음',
+  site.requested.some(r => r.endsWith('/' + lastOpen)), JSON.stringify(site.requested.length));
+
+console.log('\n[자동] 지나간 달의 기억은 버리고, 확인 못 한 달은 지킨다');
+settingsSetup({});
+site.window = { from: thisMonth, to: lastOpen };
+site.open = {};
+const keepMonth = addMonths(thisMonth, 2);
+site.open[keepMonth] = [1];
+out = tick();
+check('처음엔 알림', out.length === 1, JSON.stringify(out.map(p => p.title)));
+store.openSet = JSON.stringify([addMonths(thisMonth, -3) + '-01'].concat(JSON.parse(store.openSet)));
+site.failMonths = [keepMonth];
+tick();
+check('지나간 달은 버림', store.openSet.indexOf(addMonths(thisMonth, -3)) === -1, store.openSet);
+check('확인 못 한 달은 지킴', store.openSet.indexOf(keepMonth) !== -1, store.openSet);
 
 console.log('\n' + (failures ? failures + '개 실패' : '전부 통과'));
 process.exit(failures ? 1 : 0);
