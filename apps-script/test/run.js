@@ -1,9 +1,13 @@
 /**
  * Code.gs 회귀 테스트.
  *
- * Apps Script 런타임(PropertiesService / UrlFetchApp / LockService / Utilities)을 흉내 내서
- * Code.gs 를 그대로 돌린다. 특히 "조회가 실패했을 때 상태를 어떻게 다루는가"를 확인한다.
- * 이 부분이 깨지면 같은 날짜를 반복해서 알리거나, 감시가 조용히 죽는다.
+ * Apps Script 런타임(PropertiesService / UrlFetchApp / MailApp / LockService / …)을
+ * 흉내 내서 Code.gs 를 그대로 돌린다. 확인하는 것은 두 가지다.
+ *
+ *   1. 조회가 실패했을 때 상태를 어떻게 다루는가
+ *      → 깨지면 같은 날짜를 반복해서 알리거나, 감시가 조용히 죽는다.
+ *   2. 알림 채널 하나가 막혔을 때 다른 채널로 넘어가는가
+ *      → 깨지면 빈자리가 나와도 아무 데도 도착하지 않는다.
  *
  * 실행:  node apps-script/test/run.js
  */
@@ -16,11 +20,11 @@ const vm = require('vm');
 
 const CODE = fs.readFileSync(path.join(__dirname, '..', 'Code.gs'), 'utf8');
 
-/** 가짜 사이트 + 가짜 구글 런타임. */
+/** 가짜 사이트 + 가짜 구글 런타임. 보낸 알림을 모아서 돌려준다. */
 function createRuntime(site, store) {
-  const pushes = [];
+  const sent = [];
   const ctx = {
-    console: { log() {}, warn() {} },
+    console: { log() {}, warn() {}, error() {} },
     PropertiesService: {
       getScriptProperties: () => ({
         getProperty: k => (k in store ? store[k] : null),
@@ -29,6 +33,13 @@ function createRuntime(site, store) {
       }),
     },
     LockService: { getScriptLock: () => ({ tryLock: () => true, releaseLock() {} }) },
+    Session: { getEffectiveUser: () => ({ getEmail: () => 'me@example.com' }) },
+    MailApp: {
+      sendEmail(opts) {
+        if (site.emailOk === false) throw new Error('Service invoked too many times');
+        sent.push({ channel: 'email', title: opts.subject, body: opts.body });
+      },
+    },
     Utilities: {
       sleep() {},
       formatDate: () => '20260101',
@@ -37,8 +48,23 @@ function createRuntime(site, store) {
     },
     UrlFetchApp: {
       fetch(url, opts) {
-        if (url.indexOf('ntfy.sh') !== -1) {
-          pushes.push({
+        if (url.indexOf('api.telegram.org') !== -1) {
+          if (site.telegramStatus !== 200) {
+            return { getResponseCode: () => site.telegramStatus, getContentText: () => '{"ok":false}' };
+          }
+          const body = JSON.parse(opts.payload);
+          sent.push({ channel: 'telegram', title: body.text.split('\n')[0], body: body.text });
+          return { getResponseCode: () => 200, getContentText: () => '{"ok":true}' };
+        }
+        if (url.indexOf('ntfy') !== -1) {
+          if (site.ntfyStatus !== 200) {
+            return {
+              getResponseCode: () => site.ntfyStatus,
+              getContentText: () => '{"code":42908,"error":"daily message quota reached"}',
+            };
+          }
+          sent.push({
+            channel: 'ntfy',
             title: decodeHeader(opts.headers.Title),
             body: opts.payload,
             priority: opts.headers.Priority,
@@ -62,13 +88,20 @@ function createRuntime(site, store) {
   };
   vm.createContext(ctx);
   vm.runInContext(CODE, ctx);
-  return { ctx, pushes };
+  return { ctx, sent };
 }
 
-/** 실제 응답처럼 HTML 이스케이프된, true/false 가 따옴표로 묶인 JSON 문자열을 만든다. */
+/**
+ * 실제 응답을 그대로 흉내 낸다. 사이트는 그 달의 주말만 목록에 싣고,
+ * true/false 를 따옴표로 감싼 JSON 을 HTML 이스케이프해서 rs 에 넣어 보낸다.
+ */
 function buildRs(site, ym) {
+  const [y, m] = ym.split('-').map(Number);
   const days = {};
-  for (let d = 1; d <= 30; d++) days[String(d)] = { closed: 'true' };
+  for (let d = 1; d <= new Date(y, m, 0).getDate(); d++) {
+    const wd = new Date(y, m - 1, d).getDay();
+    if (wd === 0 || wd === 6) days[String(d)] = { closed: 'true' };
+  }
   (site.open[ym] || []).forEach(d => { days[String(d)] = { closed: 'false' }; });
   return JSON.stringify({ days }).replace(/"/g, '&quot;');
 }
@@ -90,75 +123,141 @@ function check(name, condition, detail) {
 
 // ───────────────────────────────────────────────────────────
 
-const site = { cookieOk: true, failMonths: [], open: { '2027-05': [3, 15] } };
+const site = {
+  cookieOk: true,
+  failMonths: [],
+  open: { '2027-05': [1, 2] },   // 2027-05-01(토), 05-02(일)
+  ntfyStatus: 200,
+  telegramStatus: 200,
+  emailOk: true,
+};
 const store = { NTFY_TOPIC: 'test-topic' };
 
 /** 한 회차를 돌리고 그동안 나간 알림을 돌려준다. */
 function tick() {
-  const { ctx, pushes } = createRuntime(site, store);
+  const { ctx, sent } = createRuntime(site, store);
   ctx.checkOpenings();
-  return pushes;
+  return sent;
 }
 
-const isSlotAlert = p => p.title.indexOf('빈자리 ') !== -1 && p.priority === 'urgent';
+const isSlotAlert = p => p.title.indexOf('빈자리 ') !== -1;
+const clearState = () => { for (const k in store) delete store[k]; };
 
-console.log('\n첫 실행 — 지금 열려 있는 날을 알린다');
-let sent = tick();
-check('알림 1통', sent.length === 1, JSON.stringify(sent));
+console.log('\n[상태] 첫 실행 — 지금 열려 있는 날을 알린다');
+let out = tick();
+check('알림 1통', out.length === 1, JSON.stringify(out));
 check('두 날짜 모두 포함',
-  sent[0] && /2027-05-03/.test(sent[0].body) && /2027-05-15/.test(sent[0].body), sent[0] && sent[0].body);
-check('상태 저장됨', store.openSet === '["2027-05-03","2027-05-15"]', store.openSet);
+  out[0] && /2027-05-01/.test(out[0].body) && /2027-05-02/.test(out[0].body), out[0] && out[0].body);
+check('상태 저장됨', store.openSet === '["2027-05-01","2027-05-02"]', store.openSet);
 
-console.log('\n변화가 없으면 다시 알리지 않는다');
+console.log('\n[상태] 변화가 없으면 다시 알리지 않는다');
 check('알림 0통', tick().length === 0);
 
-console.log('\n새 날짜가 생기면 그 날짜만 알린다');
-site.open['2027-06'] = [7];
-sent = tick();
-check('알림 1통', sent.length === 1, JSON.stringify(sent));
+console.log('\n[상태] 새 날짜가 생기면 그 날짜만 알린다');
+site.open['2027-06'] = [5];
+out = tick();
+check('알림 1통', out.length === 1, JSON.stringify(out));
 check('새 날짜만 언급',
-  sent[0] && /2027-06-07/.test(sent[0].body) && !/2027-05-03/.test(sent[0].body), sent[0] && sent[0].body);
+  out[0] && /2027-06-05/.test(out[0].body) && !/2027-05-01/.test(out[0].body), out[0] && out[0].body);
 
-console.log('\n일부 달만 조회 실패 — 그 달의 상태를 잃지 않는다');
+console.log('\n[상태] 일부 달만 조회 실패 — 그 달의 상태를 잃지 않는다');
 site.failMonths = ['2027-05'];
-sent = tick();
-check('중복 빈자리 알림 없음', !sent.some(isSlotAlert), JSON.stringify(sent));
-check('실패한 달의 날짜가 상태에 남아있음', store.openSet.indexOf('2027-05-03') !== -1, store.openSet);
+out = tick();
+check('중복 빈자리 알림 없음', !out.some(isSlotAlert), JSON.stringify(out));
+check('실패한 달의 날짜가 상태에 남아있음', store.openSet.indexOf('2027-05-01') !== -1, store.openSet);
 check('실패 1회로 기록', store.failCount === '1', store.failCount);
 
-console.log('\n실패했던 달이 복구돼도 재알림이 가지 않는다');
+console.log('\n[상태] 실패했던 달이 복구돼도 재알림이 가지 않는다');
 site.failMonths = [];
 check('알림 0통', tick().length === 0);
 check('실패 횟수 초기화', store.failCount === '0', store.failCount);
 
-console.log('\n전체 실패가 이어지면 점검 알림이 한 번만 간다');
+console.log('\n[상태] 전체 실패가 이어지면 점검 알림이 한 번만 간다');
 site.cookieOk = false;
 const snapshot = store.openSet;
 check('1회차 조용함', tick().length === 0);
 check('2회차 조용함', tick().length === 0);
-sent = tick();
-check('3회차에 점검 알림', sent.length === 1 && sent[0].priority === 'high', JSON.stringify(sent));
-check('점검 알림에 원인 포함', sent[0] && /세션 쿠키/.test(sent[0].body), sent[0] && sent[0].body);
+out = tick();
+check('3회차에 점검 알림', out.length === 1 && /확인 실패/.test(out[0].title), JSON.stringify(out));
+check('점검 알림에 원인 포함', out[0] && /세션 쿠키/.test(out[0].body), out[0] && out[0].body);
 check('4회차는 중복 알림 없음', tick().length === 0);
 check('상태는 그대로 보존', store.openSet === snapshot, store.openSet);
 
-console.log('\n복구되면 복구 알림이 간다');
+console.log('\n[상태] 복구되면 복구 알림이 간다');
 site.cookieOk = true;
-sent = tick();
-check('복구 알림 포함', sent.some(p => p.priority === 'low'), JSON.stringify(sent.map(p => p.title)));
+out = tick();
+check('복구 알림 포함', out.some(p => /복구/.test(p.title)), JSON.stringify(out.map(p => p.title)));
 check('그 다음 회차는 조용함', tick().length === 0);
 
-console.log('\n응답 형식이 깨져 전부 열림으로 보이면 날짜를 쏟아내지 않는다');
-for (const k in store) if (k !== 'NTFY_TOPIC') delete store[k];
+console.log('\n[상태] 조회된 날이 거의 전부 열림이면 — 막지 않고 경고로 알린다');
+clearState();
+store.NTFY_TOPIC = 'test-topic';
 site.failMonths = [];
 site.open = {};
 ['2027-05', '2027-06', '2027-09', '2027-10', '2027-11'].forEach(ym => {
-  site.open[ym] = Array.from({ length: 30 }, (_, i) => i + 1);
+  site.open[ym] = Array.from({ length: 31 }, (_, i) => i + 1);
 });
-sent = tick();
-check('빈자리 알림 없음', !sent.some(isSlotAlert), JSON.stringify(sent.map(p => p.title)));
-check('실패로 기록', store.failCount === '1', store.failCount);
-check('상태를 건드리지 않음', store.openSet === undefined, store.openSet);
+out = tick();
+check('알림은 간다', out.length === 1, JSON.stringify(out.map(p => p.title)));
+check('평소와 다른 제목으로 경고', out[0] && /확인 필요/.test(out[0].title), out[0] && out[0].title);
+check('직접 확인하라고 안내', out[0] && /직접 확인/.test(out[0].body));
+check('상태를 저장해 한 번만 알림', tick().length === 0);
+
+// ───────── 알림 채널 ─────────
+
+function channelSetup(props) {
+  clearState();
+  Object.keys(props).forEach(k => { store[k] = props[k]; });
+  site.failMonths = [];
+  site.open = { '2027-05': [1] };
+  site.ntfyStatus = 200;
+  site.telegramStatus = 200;
+  site.emailOk = true;
+}
+
+console.log('\n[채널] ntfy 만 설정하면 ntfy 로 간다');
+channelSetup({ NTFY_TOPIC: 'test-topic' });
+out = tick();
+check('ntfy 1통', out.length === 1 && out[0].channel === 'ntfy', JSON.stringify(out.map(p => p.channel)));
+
+console.log('\n[채널] ntfy 가 429 로 막히면 이메일로 넘어간다 (실제로 겪은 상황)');
+channelSetup({ NTFY_TOPIC: 'test-topic' });
+site.ntfyStatus = 429;
+out = tick();
+check('이메일로 도착', out.length === 1 && out[0].channel === 'email', JSON.stringify(out.map(p => p.channel)));
+check('내용은 그대로', out[0] && /2027-05-01/.test(out[0].body), out[0] && out[0].body);
+
+console.log('\n[채널] 아무것도 설정 안 해도 이메일로 간다');
+channelSetup({});
+out = tick();
+check('이메일로 도착', out.length === 1 && out[0].channel === 'email', JSON.stringify(out.map(p => p.channel)));
+
+console.log('\n[채널] 텔레그램이 있으면 텔레그램을 먼저 쓴다');
+channelSetup({ TELEGRAM_TOKEN: 't', TELEGRAM_CHAT_ID: '1', NTFY_TOPIC: 'test-topic' });
+out = tick();
+check('텔레그램 1통', out.length === 1 && out[0].channel === 'telegram', JSON.stringify(out.map(p => p.channel)));
+
+console.log('\n[채널] 텔레그램이 죽으면 ntfy → 이메일 순으로 내려간다');
+channelSetup({ TELEGRAM_TOKEN: 't', TELEGRAM_CHAT_ID: '1', NTFY_TOPIC: 'test-topic' });
+site.telegramStatus = 401;
+out = tick();
+check('ntfy 로 도착', out.length === 1 && out[0].channel === 'ntfy', JSON.stringify(out.map(p => p.channel)));
+
+channelSetup({ TELEGRAM_TOKEN: 't', TELEGRAM_CHAT_ID: '1', NTFY_TOPIC: 'test-topic' });
+site.telegramStatus = 401;
+site.ntfyStatus = 429;
+out = tick();
+check('둘 다 죽으면 이메일로 도착', out.length === 1 && out[0].channel === 'email',
+  JSON.stringify(out.map(p => p.channel)));
+
+console.log('\n[채널] 모든 채널이 죽어도 감시 자체는 멈추지 않는다');
+channelSetup({ TELEGRAM_TOKEN: 't', TELEGRAM_CHAT_ID: '1', NTFY_TOPIC: 'test-topic' });
+site.telegramStatus = 401;
+site.ntfyStatus = 429;
+site.emailOk = false;
+out = tick();
+check('알림 0통', out.length === 0);
+check('그래도 상태는 기록됨', store.openSet === '["2027-05-01"]', store.openSet);
 
 console.log('\n' + (failures ? failures + '개 실패' : '전부 통과'));
 process.exit(failures ? 1 : 0);

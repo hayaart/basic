@@ -1,13 +1,17 @@
 /*************************************************************
  *  삼성 금융연수원 웨딩홀 "빈자리(취소 자리)" 알림 — Google Apps Script
  *
- *  ▼▼▼ 설정: 아래 세 줄만 확인하세요 ▼▼▼
+ *  설정은 코드가 아니라 [프로젝트 설정 > 스크립트 속성]에서 합니다.
+ *  (README.md 참고)
+ *
+ *    EMAIL_TO          이메일 받을 주소. 비워두면 내 구글 계정으로 옵니다.
+ *    TELEGRAM_TOKEN    텔레그램 봇 토큰      ─┐ 즉시 푸시를 원하면
+ *    TELEGRAM_CHAT_ID  텔레그램 채팅 ID      ─┘ 둘 다 넣으세요
+ *    NTFY_TOPIC        ntfy 토픽 이름 (선택)
+ *
+ *  알림은 [텔레그램 → ntfy → 이메일] 순으로 시도하고, 하나라도 성공하면 멈춥니다.
+ *  이메일은 설정이 없어도 항상 마지막 보루로 동작합니다.
  *************************************************************/
-
-// 폰 ntfy 앱에서 구독할 '나만의 토픽 이름'.
-// 권장: 여기를 비워 두고 [프로젝트 설정 > 스크립트 속성]에 NTFY_TOPIC 으로 저장하세요.
-//       (이 파일은 공개 저장소에 올라가므로 토픽을 적어 두면 남에게 노출됩니다.)
-var NTFY_TOPIC_FALLBACK = '';
 
 var HALL_CODE = '5';                                             // 5 = 삼성금융연수원
 var MONTHS    = ['2027-05', '2027-06', '2027-09', '2027-10', '2027-11'];
@@ -22,10 +26,13 @@ var SVC_URL   = 'https://s-wedding.samsungcard.com/service/SWDDWSWSWHS03';
 
 var FAIL_ALERT_AFTER = 3;      // 이만큼 연속으로 문제가 생기면 '점검 필요' 알림 (3회 = 약 30분)
 var HEARTBEAT_HOURS  = 24;     // 이 시간마다 '살아있음' 알림. 0 으로 두면 끕니다.
-var MAX_OPEN_PER_MONTH = 20;   // 한 달에 이보다 많이 열리면 응답 형식이 바뀐 것으로 의심
 var MAX_LINES = 30;            // 알림 한 통에 적는 최대 날짜 수
 var JITTER_MS = 90 * 1000;     // 매 실행을 0~90초 무작위로 늦춰 규칙적인 패턴을 피한다
 var GAP_MS    = 1200;          // 달과 달 사이 간격
+
+// 조회된 날짜의 대부분이 '열림'으로 보이면 파싱이 깨졌을 수 있다. 판단 기준.
+var SUSPICIOUS_MIN_DAYS  = 8;
+var SUSPICIOUS_RATIO     = 0.8;
 
 // ───────────────────────────────────────────────────────────
 //  트리거에서 10분마다 자동 실행되는 함수
@@ -59,22 +66,21 @@ function runCheck_() {
     return;
   }
 
-  // 열린 날이 비정상적으로 많으면 파싱이 깨진 것으로 본다. 날짜 150개를 쏟아내지 않고 점검 알림만 보낸다.
-  var okCount = MONTHS.length - scan.failed.length;
-  if (scan.open.length > okCount * MAX_OPEN_PER_MONTH) {
-    var why = '열린 날이 ' + scan.open.length + '건으로 비정상적으로 많습니다. 응답 형식이 바뀐 것 같습니다.';
-    console.warn(why);
-    recordFailure_(props, why);
-    return;
-  }
-
-  // 실패한 달은 이전 상태를 그대로 이어받는다 → 일시적 실패가 중복 알림으로 번지지 않게.
+  // 실패한 달은 이전 상태를 이어받는다 → 일시적 실패가 중복 알림으로 번지지 않게.
   var carried = prev.filter(function (d) { return scan.failed.indexOf(d.slice(0, 7)) !== -1; });
   var openNow = dedupeSorted_(scan.open.concat(carried));
 
   var newly = openNow.filter(function (d) { return !prevSet[d]; });
   if (newly.length) {
-    pushNtfy_('🎉 ' + HALL_NAME + ' 빈자리 ' + newly.length + '건', buildSlotMessage_(newly), 'urgent');
+    if (isSuspicious_(scan)) {
+      // 응답 형식이 바뀐 것일 수 있다. 그렇다고 입을 다물면 진짜 기회를 놓치므로,
+      // 알리되 제목을 다르게 해서 '직접 확인하라'고 말한다.
+      notify_('⚠️ 확인 필요 — ' + HALL_NAME + ' ' + newly.length + '건',
+              '조회된 날짜가 거의 전부 열림으로 나옵니다. 사이트 응답 형식이 바뀐 것일 수 있으니 ' +
+              '진짜 빈자리인지 직접 확인해 보세요.\n\n' + buildSlotMessage_(newly), 'high');
+    } else {
+      notify_('🎉 ' + HALL_NAME + ' 빈자리 ' + newly.length + '건', buildSlotMessage_(newly), 'urgent');
+    }
   }
 
   props.setProperty('openSet', JSON.stringify(openNow));
@@ -95,7 +101,7 @@ function runCheck_() {
 
 /** 대상 월을 모두 조회한다. 일부가 실패해도 나머지는 진행한다. */
 function scanMonths_() {
-  var result = { open: [], failed: [], errors: [] };
+  var result = { open: [], total: 0, failed: [], errors: [] };
 
   var cookie;
   try {
@@ -110,7 +116,9 @@ function scanMonths_() {
   MONTHS.forEach(function (ym, i) {
     if (i) Utilities.sleep(GAP_MS);
     try {
-      result.open = result.open.concat(fetchOpenDays_(cookie, ym));
+      var month = fetchOpenDays_(cookie, ym);
+      result.open = result.open.concat(month.open);
+      result.total += month.total;
     } catch (e) {
       result.failed.push(ym);
       result.errors.push(ym + ': ' + e.message);
@@ -119,12 +127,21 @@ function scanMonths_() {
   return result;
 }
 
+/** 조회된 날짜의 대부분이 열림으로 보이는가? (파싱이 깨졌을 때의 신호) */
+function isSuspicious_(scan) {
+  return scan.open.length >= SUSPICIOUS_MIN_DAYS &&
+         scan.open.length > scan.total * SUSPICIOUS_RATIO;
+}
+
 // ───────────────────────────────────────────────────────────
-//  처음에 한 번 눌러 확인하는 함수 (폰 알림 테스트 + 현재 상태 + 응답 형식 점검)
+//  처음에 한 번 눌러 확인하는 함수
 // ───────────────────────────────────────────────────────────
 function sendTestPush() {
-  var ok = pushNtfy_('🔔 테스트', '테스트 알림입니다. 이 메시지가 폰에 뜨면 연결 성공! 🎉', 'high');
-  console.log(ok ? 'ntfy 전송 성공' : 'ntfy 전송 실패 — 위 로그의 응답 코드를 확인하세요.');
+  var names = enabledChannels_().map(function (c) { return c.name; });
+  console.log('설정된 알림 채널: ' + names.join(' → '));
+
+  var ok = notify_('🔔 테스트', '테스트 알림입니다. 이 메시지가 도착하면 연결 성공! 🎉', 'high');
+  console.log(ok ? '알림 전송 성공' : '모든 채널 전송 실패 — 위 로그를 확인하세요.');
 
   var cookie;
   try {
@@ -138,8 +155,9 @@ function sendTestPush() {
   MONTHS.forEach(function (ym, i) {
     if (i) Utilities.sleep(GAP_MS);
     try {
-      var open = fetchOpenDays_(cookie, ym, true);
-      console.log(ym + ' → 열린 날: ' + (open.length ? open.join(', ') : '없음(전부 마감)'));
+      var month = fetchOpenDays_(cookie, ym, true);
+      console.log(ym + ' → 조회된 날 ' + month.total + '개 중 열린 날: ' +
+                  (month.open.length ? month.open.join(', ') : '없음(전부 마감)'));
     } catch (e) {
       console.log(ym + ' → 읽기 실패: ' + e.message);
     }
@@ -163,7 +181,42 @@ function resetState() {
   console.log('상태를 초기화했습니다.');
 }
 
-// ───────── 아래는 내부 동작 (안 건드려도 됨) ─────────
+/**
+ * 텔레그램 채팅 ID 를 찾아준다.
+ * 봇을 만든 뒤 텔레그램에서 그 봇에게 아무 말이나 보내고 이 함수를 실행하세요.
+ */
+function findTelegramChatId() {
+  var token = prop_('TELEGRAM_TOKEN');
+  if (!token) {
+    console.log('먼저 스크립트 속성에 TELEGRAM_TOKEN 을 넣으세요.');
+    return;
+  }
+  var res = UrlFetchApp.fetch('https://api.telegram.org/bot' + token + '/getUpdates',
+                              { muteHttpExceptions: true });
+  var data;
+  try { data = JSON.parse(res.getContentText()); }
+  catch (e) { console.log('응답을 읽지 못했습니다: ' + res.getContentText().slice(0, 200)); return; }
+
+  if (!data.ok) {
+    console.log('텔레그램이 거절했습니다. 토큰이 맞는지 확인하세요: ' + JSON.stringify(data).slice(0, 200));
+    return;
+  }
+  var updates = data.result || [];
+  if (!updates.length) {
+    console.log('아직 받은 메시지가 없습니다. 텔레그램에서 봇에게 아무 말이나 보낸 뒤 다시 실행하세요.');
+    return;
+  }
+  var ids = {};
+  updates.forEach(function (u) {
+    var msg = u.message || u.edited_message || u.channel_post;
+    if (msg && msg.chat) ids[msg.chat.id] = (msg.chat.title || msg.chat.first_name || '');
+  });
+  Object.keys(ids).forEach(function (id) {
+    console.log('채팅 ID: ' + id + '  (' + ids[id] + ')  ← 이 숫자를 TELEGRAM_CHAT_ID 에 넣으세요');
+  });
+}
+
+// ───────── 사이트 조회 ─────────
 
 function getCookie_() {
   var res = UrlFetchApp.fetch(PAGE_URL, { muteHttpExceptions: true, followRedirects: false });
@@ -181,6 +234,7 @@ function getCookie_() {
   return cookie;
 }
 
+/** 한 달을 조회해 { open: [날짜…], total: 조회된 날 수 } 를 돌려준다. */
 function fetchOpenDays_(cookie, ym, verbose) {
   var y = ym.slice(0, 4), m = ym.slice(5, 7);
   var body = {
@@ -215,17 +269,17 @@ function fetchOpenDays_(cookie, ym, verbose) {
 
   if (verbose) console.log(ym + ' 원본 days: ' + JSON.stringify(days).slice(0, 400));
 
-  var open = [];
+  var result = { open: [], total: 0 };
   Object.keys(days).forEach(function (d) {
     var day = parseInt(d, 10);
     if (!validDate_(parseInt(y, 10), parseInt(m, 10), day)) return;
+    result.total++;
     var info = days[d];
     // 명시적으로 closed:true 인 날만 제외한다. 빈자리를 놓치는 것보다 한 번 더 알리는 쪽이 낫다.
-    // (형식이 바뀌어 전부 '열림'으로 보이는 경우는 MAX_OPEN_PER_MONTH 가 걸러낸다.)
     if (info && info.closed === true) return;
-    open.push(ym + '-' + ('0' + day).slice(-2));
+    result.open.push(ym + '-' + ('0' + day).slice(-2));
   });
-  return open;
+  return result;
 }
 
 function buildCommon_() {
@@ -241,7 +295,91 @@ function buildCommon_() {
   };
 }
 
-// ───────── 알림 ─────────
+// ───────── 알림 (여러 채널 + 자동 폴백) ─────────
+
+/**
+ * 설정된 채널을 순서대로 시도하고 하나라도 성공하면 멈춘다.
+ *
+ * 한 채널만 쓰면 그 채널이 막히는 순간(ntfy 의 IP 공유 할당량 등) 조용히 알림이 끊긴다.
+ * 그래서 이메일을 항상 마지막 보루로 둔다.
+ */
+function notify_(title, message, priority) {
+  var channels = enabledChannels_();
+  var errors = [];
+
+  for (var i = 0; i < channels.length; i++) {
+    try {
+      if (channels[i].send(title, message, priority)) {
+        if (errors.length) {
+          console.warn('앞 채널 실패 후 ' + channels[i].name + ' 로 보냈습니다: ' + errors.join(' | '));
+        }
+        return true;
+      }
+      errors.push(channels[i].name + ': 전송 실패');
+    } catch (e) {
+      errors.push(channels[i].name + ': ' + e.message);
+    }
+  }
+  console.error('모든 알림 채널 실패: ' + (errors.length ? errors.join(' | ') : '설정된 채널 없음'));
+  return false;
+}
+
+function enabledChannels_() {
+  var channels = [];
+  if (prop_('TELEGRAM_TOKEN') && prop_('TELEGRAM_CHAT_ID')) {
+    channels.push({ name: '텔레그램', send: sendTelegram_ });
+  }
+  if (prop_('NTFY_TOPIC')) {
+    channels.push({ name: 'ntfy', send: sendNtfy_ });
+  }
+  // 이메일은 설정이 없어도 내 구글 계정으로 보낼 수 있으므로 항상 마지막에 둔다.
+  channels.push({ name: '이메일', send: sendEmail_ });
+  return channels;
+}
+
+function sendTelegram_(title, message) {
+  var url = 'https://api.telegram.org/bot' + prop_('TELEGRAM_TOKEN') + '/sendMessage';
+  var res = UrlFetchApp.fetch(url, {
+    method: 'post',
+    contentType: 'application/json',
+    payload: JSON.stringify({
+      chat_id: prop_('TELEGRAM_CHAT_ID'),
+      text: title + '\n\n' + message + '\n\n' + PAGE_URL,
+      disable_web_page_preview: true
+    }),
+    muteHttpExceptions: true
+  });
+  var code = res.getResponseCode();
+  if (code >= 200 && code < 300) return true;
+  throw new Error('HTTP ' + code + ' ' + res.getContentText().slice(0, 200));
+}
+
+function sendNtfy_(title, message, priority) {
+  var server = (prop_('NTFY_SERVER') || 'https://ntfy.sh').replace(/\/+$/, '');
+  var headers = {
+    // ntfy 헤더는 latin-1 만 허용하므로 한글·이모지 제목은 RFC2047 로 인코딩한다.
+    'Title': encodeHeader_(title),
+    'Priority': priority || 'high',
+    'Tags': 'wedding_ring',
+    'Click': PAGE_URL
+  };
+  var token = prop_('NTFY_TOKEN');
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+
+  var res = UrlFetchApp.fetch(server + '/' + prop_('NTFY_TOPIC'), {
+    method: 'post', payload: message, headers: headers, muteHttpExceptions: true
+  });
+  var code = res.getResponseCode();
+  if (code >= 200 && code < 300) return true;
+  throw new Error('HTTP ' + code + ' ' + res.getContentText().slice(0, 200));
+}
+
+function sendEmail_(title, message) {
+  var to = prop_('EMAIL_TO') || Session.getEffectiveUser().getEmail();
+  if (!to) throw new Error('받을 주소를 찾지 못했습니다. 스크립트 속성 EMAIL_TO 를 넣으세요.');
+  MailApp.sendEmail({ to: to, subject: title, body: message + '\n\n' + PAGE_URL });
+  return true;
+}
 
 function buildSlotMessage_(dates) {
   var lines = [HALL_NAME + ' 예약 가능 날짜가 새로 나왔습니다.', ''];
@@ -251,33 +389,6 @@ function buildSlotMessage_(dates) {
   if (dates.length > MAX_LINES) lines.push('• … 외 ' + (dates.length - MAX_LINES) + '건');
   lines.push('', '지금 바로 신청하세요.');
   return lines.join('\n');
-}
-
-function pushNtfy_(title, message, priority) {
-  var res = UrlFetchApp.fetch('https://ntfy.sh/' + ntfyTopic_(), {
-    method: 'post',
-    payload: message,
-    headers: {
-      // ntfy 헤더는 latin-1 만 허용하므로 한글·이모지 제목은 RFC2047 로 인코딩한다.
-      'Title': encodeHeader_(title),
-      'Priority': priority || 'high',
-      'Tags': 'wedding_ring',
-      'Click': PAGE_URL
-    },
-    muteHttpExceptions: true
-  });
-  var code = res.getResponseCode();
-  console.log('ntfy 응답: ' + code + ' / ' + res.getContentText());
-  return code >= 200 && code < 300;
-}
-
-function ntfyTopic_() {
-  var topic = PropertiesService.getScriptProperties().getProperty('NTFY_TOPIC') || NTFY_TOPIC_FALLBACK;
-  if (!topic) {
-    throw new Error('ntfy 토픽이 설정되지 않았습니다. [프로젝트 설정 > 스크립트 속성]에 ' +
-                    'NTFY_TOPIC 을 추가하세요. (README 참고)');
-  }
-  return topic;
 }
 
 function encodeHeader_(value) {
@@ -294,17 +405,17 @@ function recordFailure_(props, message) {
 
   if (count >= FAIL_ALERT_AFTER && props.getProperty('failAlerted') !== 'true') {
     // 조용히 죽는 것이 가장 위험하다. 확인이 안 되고 있다는 사실 자체를 알린다.
-    var sent = pushNtfy_('⚠️ 빈자리 확인 실패 ' + count + '회 연속',
-                         '빈자리 확인이 계속 실패하고 있습니다. 알림이 안 오는 것이 아니라 ' +
-                         '확인 자체가 안 되고 있는 상태입니다.\n\n' + String(message).slice(0, 600),
-                         'high');
+    var sent = notify_('⚠️ 빈자리 확인 실패 ' + count + '회 연속',
+                       '빈자리 확인이 계속 실패하고 있습니다. 알림이 안 오는 것이 아니라 ' +
+                       '확인 자체가 안 되고 있는 상태입니다.\n\n' + String(message).slice(0, 600),
+                       'high');
     if (sent) props.setProperty('failAlerted', 'true');
   }
 }
 
 function recordSuccess_(props) {
   if (props.getProperty('failAlerted') === 'true') {
-    pushNtfy_('✅ 감시 복구됨', '빈자리 확인이 다시 정상 동작합니다.', 'low');
+    notify_('✅ 감시 복구됨', '빈자리 확인이 다시 정상 동작합니다.', 'low');
   }
   props.setProperty('failCount', '0');
   props.setProperty('failAlerted', 'false');
@@ -318,11 +429,16 @@ function maybeHeartbeat_(props, openCount) {
   if (last && now - last < HEARTBEAT_HOURS * 3600 * 1000) return;
   props.setProperty('lastHeartbeatAt', String(now));
   if (!last) return;  // 처음 실행에서는 보내지 않고 기준 시각만 잡는다.
-  pushNtfy_('💓 ' + HALL_NAME + ' 감시 중',
-            '감시는 정상 동작 중입니다. 현재 열린 날 ' + openCount + '건.', 'min');
+  notify_('💓 ' + HALL_NAME + ' 감시 중',
+          '감시는 정상 동작 중입니다. 현재 열린 날 ' + openCount + '건.', 'min');
 }
 
 // ───────── 잡다한 도우미 ─────────
+
+function prop_(key) {
+  var value = PropertiesService.getScriptProperties().getProperty(key);
+  return value ? String(value).trim() : '';
+}
 
 function readOpenSet_(props) {
   try {
