@@ -113,6 +113,11 @@ function createRuntime(site, store) {
         const body = JSON.parse(opts.payload);
         const ym = body.wedgEtblfmPsbY + '-' + body.wedgEtblfmPsbMm;
         site.requested.push(body.wedgHllC + '/' + ym);
+        // 서버에 닿지도 못하는 일시적 오류. UrlFetchApp 은 이때 예외를 던진다.
+        if (site.throwOnce && site.throwOnce[ym]) {
+          delete site.throwOnce[ym];
+          throw new Error('Address unavailable: ' + url);
+        }
         if (site.failMonths.indexOf(ym) !== -1) {
           return { getResponseCode: () => 500, getContentText: () => 'Internal Server Error' };
         }
@@ -208,12 +213,14 @@ site.failMonths = ['2027-05'];
 out = tick();
 check('중복 빈자리 알림 없음', !out.some(isSlotAlert), JSON.stringify(out));
 check('실패한 달의 날짜가 상태에 남아있음', store.openSet.indexOf('2027-05-01') !== -1, store.openSet);
-check('실패 1회로 기록', store.failCount === '1', store.failCount);
+check('전체 실패로 세지 않음', !Number(store.failCount || 0), store.failCount);
+check('부분 실패로 기록', store.partialCount === '1', store.partialCount);
 
 console.log('\n[상태] 실패했던 달이 복구돼도 재알림이 가지 않는다');
 site.failMonths = [];
 check('알림 0통', tick().length === 0);
-check('실패 횟수 초기화', store.failCount === '0', store.failCount);
+check('실패 횟수 초기화', store.failCount === '0' && store.partialCount === '0',
+  store.failCount + '/' + store.partialCount);
 
 console.log('\n[상태] 전체 실패가 이어지면 점검 알림이 한 번만 간다');
 site.cookieOk = false;
@@ -434,13 +441,17 @@ check('상태 메시지 없음', lastStatus.length === 0, JSON.stringify(lastSta
 // ───────── 텔레그램에서 말 걸면 답하기 ─────────
 
 /** 텔레그램이 보내오는 요청을 흉내 낸다. 답장 목록을 돌려준다. */
+let updateId = 1000;
 function post(text, opts) {
   opts = opts || {};
   site.requested = [];
   const { ctx, sent } = createRuntime(site, store);
   ctx.doPost({
     parameter: { s: 'secret' in opts ? opts.secret : store.WEBHOOK_SECRET, b: opts.b },
-    postData: { contents: JSON.stringify({ message: { text: text, chat: { id: opts.chat || 1 } } }) },
+    postData: { contents: JSON.stringify({
+      update_id: 'updateId' in opts ? opts.updateId : ++updateId,
+      message: { text: text, chat: { id: opts.chat || 1 } },
+    })},
   });
   return sent;
 }
@@ -531,6 +542,52 @@ out = post('상태', { b: 'status', chat: 2 });
 check('상태 봇에 물으면 상태 봇이 답함', out.length === 1 && out[0].bot === 'st',
   JSON.stringify(out.map(p => p.bot)));
 check('남의 대화방 번호로는 무응답', post('상태', { b: 'status', chat: 1 }).length === 0);
+
+// ───────── 흔들림에 과민반응하지 않기 ─────────
+
+console.log('\n[흔들림] 일시적 네트워크 오류는 한 번 다시 해본다');
+channelSetup({ TELEGRAM_TOKEN: 't', TELEGRAM_CHAT_ID: '1' });
+site.open = { '2027-05': [1] };
+site.throwOnce = { '2027-05': true };
+out = tick();
+check('알림은 정상적으로 감', out.length === 1 && isSlotAlert(out[0]), JSON.stringify(out.map(p => p.title)));
+check('실패로 세지 않음', !Number(store.partialCount || 0) && !Number(store.failCount || 0),
+  store.partialCount + '/' + store.failCount);
+
+console.log('\n[흔들림] 한 달이 계속 안 되면 2시간쯤 뒤에 한 번만 알린다');
+channelSetup({ TELEGRAM_TOKEN: 't', TELEGRAM_CHAT_ID: '1' });
+site.open = { '2027-05': [1] };
+site.failMonths = ['2027-06'];
+let partialAlerts = 0;
+for (let i = 0; i < 14; i++) partialAlerts += tick().filter(p => /일부 달/.test(p.title)).length;
+check('14회 도는 동안 알림은 한 번만', partialAlerts === 1, String(partialAlerts));
+check('부분 실패 횟수가 쌓임', Number(store.partialCount) === 14, store.partialCount);
+
+console.log('\n[흔들림] 복구되면 복구 알림이 간다');
+site.failMonths = [];
+out = tick();
+check('복구 알림', out.some(p => /복구/.test(p.title)), JSON.stringify(out.map(p => p.title)));
+
+// ───────── 텔레그램 재전송 ─────────
+
+console.log('\n[재전송] 같은 메시지를 다시 받아도 두 번 답하지 않는다');
+channelSetup({ TELEGRAM_TOKEN: 't', TELEGRAM_CHAT_ID: '1', WEBHOOK_SECRET: 'secret' });
+site.open = { '2027-05': [1] };
+tick();
+check('처음엔 답함', post('상태', { updateId: 5001 }).length === 1);
+check('같은 번호는 무시', post('상태', { updateId: 5001 }).length === 0);
+check('지난 번호도 무시', post('상태', { updateId: 4999 }).length === 0);
+check('새 번호에는 답함', post('상태', { updateId: 5002 }).length === 1);
+
+console.log('\n[재전송] 봇마다 따로 센다');
+channelSetup({
+  TELEGRAM_TOKEN: 't', TELEGRAM_CHAT_ID: '1',
+  STATUS_TELEGRAM_TOKEN: 'st', STATUS_TELEGRAM_CHAT_ID: '2',
+  WEBHOOK_SECRET: 'secret',
+});
+tick();
+check('알림 봇 1번 메시지', post('상태', { b: 'main', chat: 1, updateId: 1 }).length === 1);
+check('상태 봇도 1번 메시지는 처음', post('상태', { b: 'status', chat: 2, updateId: 1 }).length === 1);
 
 console.log('\n' + (failures ? failures + '개 실패' : '전부 통과'));
 process.exit(failures ? 1 : 0);

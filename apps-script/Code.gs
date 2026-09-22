@@ -38,7 +38,8 @@ var MAX_MONTHS_AHEAD = Number(prop_('MAX_MONTHS_AHEAD')) || 24;
 var PAGE_URL  = 'https://s-wedding.samsungcard.com/internal/add-apply/UWDDWSWH04M1.jsp';
 var SVC_URL   = 'https://s-wedding.samsungcard.com/service/SWDDWSWSWHS03';
 
-var FAIL_ALERT_AFTER = 3;      // 이만큼 연속으로 문제가 생기면 '점검 필요' 알림 (3회 = 약 30분)
+var FAIL_ALERT_AFTER = 3;      // 전체 조회가 이만큼 연속 실패하면 '점검 필요' 알림 (3회 = 약 30분)
+var PARTIAL_ALERT_AFTER = 12;  // 일부 달만 계속 못 볼 때의 기준 (12회 = 약 2시간)
 var HEARTBEAT_HOURS  = 24;     // 이 시간마다 '살아있음' 알림. 0 으로 두면 끕니다.
 var MAX_LINES = 30;            // 알림 한 통에 적는 최대 날짜 수
 var JITTER_MS = 90 * 1000;     // 매 실행을 0~90초 무작위로 늦춰 규칙적인 패턴을 피한다
@@ -110,9 +111,8 @@ function runCheck_() {
   props.setProperty('openSet', JSON.stringify(openNow));
 
   if (scan.failed.length) {
-    // 일부 달만 실패: 알림은 정상적으로 보냈지만 반쪽짜리 결과이므로 실패로 센다.
-    console.warn('일부 조회 실패: ' + scan.errors.join(' | '));
-    recordFailure_(props, scan.errors.join(' | '));
+    // 일부 달만 실패한 것은 감시가 멈춘 것과 다르다. 따로 세고, 오래 이어질 때만 알린다.
+    recordPartial_(props, scan.failed, scan.errors);
   } else {
     recordSuccess_(props);
     maybeHeartbeat_(props, openNow.length);
@@ -229,7 +229,8 @@ function createTrigger() {
 /** 기억해 둔 상태를 지운다. 다음 실행에서 현재 열린 날을 전부 새 빈자리로 다시 알립니다. */
 function resetState() {
   var props = PropertiesService.getScriptProperties();
-  ['openSet', 'hallCode', 'statusMsgId', 'statusMsgChat', 'failCount', 'failAlerted', 'lastError', 'lastSuccessAt', 'lastHeartbeatAt']
+  ['openSet', 'hallCode', 'statusMsgId', 'statusMsgChat', 'failCount', 'failAlerted',
+   'partialCount', 'partialAlerted', 'lastError', 'lastSuccessAt', 'lastHeartbeatAt']
     .forEach(function (k) { props.deleteProperty(k); });
   console.log('상태를 초기화했습니다.');
 }
@@ -259,6 +260,9 @@ function handleTelegramUpdate_(e) {
   var which = e.parameter.b === 'status' ? 'status' : 'main';
 
   var update = JSON.parse(e.postData.contents);
+  // 답이 늦으면 텔레그램이 같은 메시지를 다시 보낸다. 같은 것에 두 번 답하지 않는다.
+  if (!isNewUpdate_(which, update.update_id)) return;
+
   var msg = update.message || update.edited_message;
   if (!msg || !msg.chat || !msg.text) return;
   // 내 대화방에서 온 것만 받는다.
@@ -276,6 +280,17 @@ function handleTelegramUpdate_(e) {
   } else {
     reply_(which, storedStatusText_());
   }
+}
+
+/** 이미 처리한 메시지인가? 텔레그램의 재전송을 걸러낸다. */
+function isNewUpdate_(which, id) {
+  if (typeof id !== 'number') return true;
+  var key = 'lastUpdateId_' + which;
+  var props = PropertiesService.getScriptProperties();
+  if (id <= Number(props.getProperty(key) || 0)) return false;
+  // 처리 전에 먼저 기록한다. 도중에 실패하더라도 같은 메시지로 계속 돌지 않게.
+  props.setProperty(key, String(id));
+  return true;
 }
 
 function reply_(which, text) {
@@ -303,10 +318,12 @@ function storedStatusText_() {
   var props = PropertiesService.getScriptProperties();
   var open = readOpenSet_(props);
   var fails = Number(props.getProperty('failCount') || 0);
+  var partial = Number(props.getProperty('partialCount') || 0);
   var last = props.getProperty('lastSuccessAt');
 
   var lines = [];
-  lines.push(fails ? '🔴 확인 실패 ' + fails + '회 연속' : '🟢 감시 중');
+  lines.push(fails ? '🔴 확인 실패 ' + fails + '회 연속'
+                   : (partial ? '🟡 일부 달만 확인됨 (' + partial + '회 연속)' : '🟢 감시 중'));
   lines.push('');
   lines.push('예식장: ' + HALL_NAME);
   lines.push('마지막 성공: ' + (last ? ago_(last) : '아직 없음'));
@@ -314,7 +331,7 @@ function storedStatusText_() {
   if (open.length) lines.push('  ' + open.slice(0, 10).join(', ') + (open.length > 10 ? ' 외' : ''));
 
   var error = props.getProperty('lastError');
-  if (fails && error) lines.push('', '원인: ' + error.slice(0, 200));
+  if ((fails || partial) && error) lines.push('', '원인: ' + error.slice(0, 200));
 
   var on = ScriptApp.getProjectTriggers().some(function (t) {
     return t.getHandlerFunction() === 'checkOpenings';
@@ -497,8 +514,22 @@ function findChatId_(which, tokenKey, chatKey) {
 
 // ───────── 사이트 조회 ─────────
 
+/**
+ * 'Address unavailable' 처럼 서버에 닿지도 못하는 일시적 오류는 한 번 쉬었다 다시 해본다.
+ * 한 회차에 20번 가까이 부르다 보면 그중 하나는 이런 식으로 튕기는데, 그때마다
+ * 감시가 고장난 것처럼 구는 건 과민반응이다.
+ */
+function fetchWithRetry_(url, options) {
+  try {
+    return UrlFetchApp.fetch(url, options);
+  } catch (e) {
+    Utilities.sleep(2000);
+    return UrlFetchApp.fetch(url, options);
+  }
+}
+
 function getCookie_() {
-  var res = UrlFetchApp.fetch(PAGE_URL, { muteHttpExceptions: true, followRedirects: false });
+  var res = fetchWithRetry_(PAGE_URL, { muteHttpExceptions: true, followRedirects: false });
   var headers = res.getAllHeaders();
   var sc = headers['Set-Cookie'] || headers['set-cookie'] || [];
   if (typeof sc === 'string') sc = [sc];
@@ -523,7 +554,7 @@ function fetchOpenDays_(cookie, ym, verbose, hallCode) {
     wedgHllC: hallCode || HALL_CODE, wedgEtblfmPsbY: y, wedgEtblfmPsbMm: m, wedgAplcBooStc: '4',
     common: buildCommon_()
   };
-  var res = UrlFetchApp.fetch(SVC_URL, {
+  var res = fetchWithRetry_(SVC_URL, {
     method: 'post',
     contentType: 'application/json; charset=UTF-8',
     headers: { 'Cookie': cookie, 'X-Requested-With': 'XMLHttpRequest', 'Referer': PAGE_URL },
@@ -812,12 +843,30 @@ function recordFailure_(props, message) {
   }
 }
 
+/** 일부 달만 못 본 경우. 오래 이어지면 그때 한 번 알린다. */
+function recordPartial_(props, failed, errors) {
+  var count = Number(props.getProperty('partialCount') || 0) + 1;
+  props.setProperty('partialCount', String(count));
+  props.setProperty('lastError', String(errors.join(' | ')).slice(0, 500));
+  console.warn('일부 조회 실패 (' + count + '회 연속): ' + errors.join(' | '));
+
+  if (count >= PARTIAL_ALERT_AFTER && props.getProperty('partialAlerted') !== 'true') {
+    var sent = notify_('⚠️ 일부 달을 계속 못 보고 있습니다',
+                       failed.join(', ') + ' 을 ' + count + '회 연속 확인하지 못했습니다. ' +
+                       '나머지 달은 정상 감시 중입니다.\n\n' + String(errors.join(' | ')).slice(0, 400),
+                       'high');
+    if (sent) props.setProperty('partialAlerted', 'true');
+  }
+}
+
 function recordSuccess_(props) {
-  if (props.getProperty('failAlerted') === 'true') {
+  if (props.getProperty('failAlerted') === 'true' || props.getProperty('partialAlerted') === 'true') {
     notify_('✅ 감시 복구됨', '빈자리 확인이 다시 정상 동작합니다.', 'low');
   }
   props.setProperty('failCount', '0');
   props.setProperty('failAlerted', 'false');
+  props.setProperty('partialCount', '0');
+  props.setProperty('partialAlerted', 'false');
   props.setProperty('lastSuccessAt', new Date().toISOString());
 }
 
