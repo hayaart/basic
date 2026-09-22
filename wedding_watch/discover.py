@@ -65,6 +65,24 @@ def capture_requests(
     storage_state = Path(storage_state)
     captured: list[dict[str, Any]] = []
 
+    form_posts: list[dict[str, Any]] = []
+
+    def on_request(request):
+        """로그인 폼처럼 보이는 POST 의 '필드 이름'만 기록한다. 값은 저장하지 않는다."""
+        if request.method != "POST":
+            return
+        try:
+            data = request.post_data
+        except Exception:
+            return
+        if not data or data.lstrip().startswith(("{", "[")):
+            return
+        names = sorted({pair.split("=", 1)[0] for pair in data.split("&") if "=" in pair})
+        if not names:
+            return
+        form_posts.append({"url": request.url, "field_names": names})
+        print(f"  [폼 POST] {request.url[:80]} 필드={names}")
+
     def on_response(response):
         url = response.url
         if url.lower().split("?")[0].endswith(STATIC_SUFFIXES):
@@ -99,13 +117,16 @@ def capture_requests(
         if storage_state.exists():
             context_args["storage_state"] = str(storage_state)
         context = browser.new_context(**context_args)
+        context.on("request", on_request)
         context.on("response", on_response)
         page = context.new_page()
         page.goto(start_url, wait_until="domcontentloaded")
         print()
         print("=" * 68)
-        print(" 브라우저에서 삼성금융연수원 예약 달력을 열고,")
-        print(" 2027년 5월 → 6월 … 처럼 월을 몇 번 넘겨 보세요.")
+        print(" 1) 로그인을 여기서 하면 로그인 폼의 '필드 이름'도 같이 기록합니다.")
+        print("    (자동 재로그인 설정에 필요합니다. 아이디/비밀번호 값은 저장하지 않습니다.)")
+        print(" 2) 삼성금융연수원 예약 달력을 열고,")
+        print("    2027년 5월 → 6월 … 처럼 월을 몇 번 넘겨 보세요.")
         print(" 그동안 오간 JSON 요청을 기록합니다.")
         print(" 끝나면 이 터미널에서 Enter 를 누르세요.")
         print("=" * 68)
@@ -119,6 +140,11 @@ def capture_requests(
         json.dumps(captured, ensure_ascii=False, indent=2)[:20_000_000], encoding="utf-8"
     )
     print(f"\nJSON 응답 {len(captured)}건을 기록했습니다: {report_path}")
+
+    if form_posts:
+        login_path = out_dir / "suggested_login.yaml"
+        login_path.write_text(render_login_suggestions(form_posts), encoding="utf-8")
+        print(f"로그인 폼 후보를 만들었습니다: {login_path}")
 
     suggestions = suggest_configs(captured)
     if suggestions:
@@ -237,3 +263,41 @@ def render_suggestions(suggestions: list[dict[str, Any]]) -> str:
             lines.append(f"#     available_values: {values!r}   # 이 중 '예약 가능'에 해당하는 값만 남기세요")
         lines.append("")
     return "\n".join(lines)
+
+
+def render_login_suggestions(form_posts: list[dict[str, Any]]) -> str:
+    """캡처한 폼 POST 에서 source.login 설정 후보를 만든다 (필드 이름만 사용)."""
+    lines = [
+        "# 캡처된 폼 POST 입니다. 로그인 폼으로 보이는 것을 골라 config.yaml 의 source.login 에 넣으세요.",
+        "# 아이디/비밀번호 '값'은 기록하지 않았습니다. .env 의 WW_LOGIN_ID / WW_LOGIN_PW 로 넣으세요.",
+        "",
+    ]
+    for index, post in enumerate(form_posts, start=1):
+        names = post["field_names"]
+        id_guess = _guess_field(names, ("id", "user", "mbr", "login"))
+        pw_guess = _guess_field(names, ("pw", "pass", "pwd"))
+        lines += [
+            f"# --- 후보 {index} ---",
+            "# login:",
+            "#   enabled: true",
+            f"#   url: {post['url'].split('?')[0]!r}",
+            "#   method: POST",
+            "#   form:",
+        ]
+        for name in names:
+            if name == id_guess:
+                lines.append(f"#     {name}: \"{{id}}\"")
+            elif name == pw_guess:
+                lines.append(f"#     {name}: \"{{password}}\"")
+            else:
+                lines.append(f"#     {name}: \"\"   # 고정값이면 캡처된 값을 직접 채우세요")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _guess_field(names: list[str], hints: tuple[str, ...]) -> str | None:
+    for name in names:
+        lowered = name.lower()
+        if any(hint in lowered for hint in hints):
+            return name
+    return None

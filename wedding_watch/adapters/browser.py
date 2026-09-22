@@ -44,18 +44,57 @@ class BrowserAdapter(Adapter):
             return self._context
         sync_playwright = _require_playwright()
         storage = Path(self.source.storage_state)
-        if not storage.exists():
+        if not storage.exists() and not self.source.login.enabled:
             raise LoginRequired(
                 f"저장된 로그인 세션이 없습니다: {storage}\n"
-                "`wedding-watch login` 을 먼저 실행해 로그인하세요."
+                "`wedding-watch login` 을 먼저 실행하거나, source.login 으로 자동 로그인을 켜세요."
             )
         self._pw = sync_playwright().start()
         self._browser = self._pw.chromium.launch(headless=self.browser_cfg.headless)
-        self._context = self._browser.new_context(storage_state=str(storage))
+        self._context = self._browser.new_context(
+            storage_state=str(storage) if storage.exists() else None
+        )
         self._context.set_default_timeout(self.timeout_ms)
+        if not storage.exists():
+            self.login()
         return self._context
 
     def fetch_month(self, year: int, month: int) -> list[Slot]:
+        try:
+            return self._fetch_month(year, month)
+        except LoginRequired:
+            if not self.source.login.enabled:
+                raise
+            log.info("세션이 만료된 것 같습니다. 자동 재로그인을 시도합니다.")
+            self.login()
+            return self._fetch_month(year, month)
+
+    def login(self) -> None:
+        """로그인 폼을 채워 제출하고 갱신된 세션을 저장한다."""
+        login = self.source.login
+        page = self._context.new_page()
+        try:
+            page.goto(self.source.login_url, wait_until="domcontentloaded", timeout=self.timeout_ms)
+            page.fill(login.id_selector, login.username or "")
+            page.fill(login.password_selector, login.password or "")
+            if login.submit_selector:
+                page.click(login.submit_selector)
+            else:
+                page.press(login.password_selector, "Enter")
+            page.wait_for_load_state("networkidle", timeout=self.timeout_ms)
+            body = page.content()[:4000]
+            for marker in login.failure_markers:
+                if marker and marker in body:
+                    # 비밀번호가 틀렸다면 재시도는 계정 잠김만 부른다.
+                    raise LoginRequired(
+                        f"로그인에 실패했습니다(아이디/비밀번호 확인 필요): {marker!r}"
+                    )
+            self._context.storage_state(path=str(self.source.storage_state))
+            log.info("자동 재로그인 성공")
+        finally:
+            page.close()
+
+    def _fetch_month(self, year: int, month: int) -> list[Slot]:
         context = self._ensure_context()
         variables = template_vars(self.hall_code, year, month)
         url = render(self.browser_cfg.url_template, variables)

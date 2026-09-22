@@ -37,6 +37,37 @@ def cookies_from_storage_state(path: str | Path) -> dict[str, str]:
     return {c["name"]: c["value"] for c in data.get("cookies", []) if "name" in c}
 
 
+def save_cookies_to_storage_state(path: str | Path, jar) -> None:
+    """재로그인으로 갱신된 쿠키를 Playwright storage_state 형식으로 되돌려 저장한다.
+
+    다음 실행(cron 등)이 로그인을 다시 하지 않고 바로 쓸 수 있게 한다.
+    """
+    path = Path(path)
+    data: dict[str, Any] = {"cookies": [], "origins": []}
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+    data.setdefault("origins", [])
+    fresh = {}
+    for cookie in jar:
+        fresh[cookie.name] = {
+            "name": cookie.name,
+            "value": cookie.value,
+            "domain": cookie.domain,
+            "path": cookie.path or "/",
+            "expires": float(cookie.expires) if cookie.expires else -1,
+            "httpOnly": False,
+            "secure": bool(cookie.secure),
+            "sameSite": "Lax",
+        }
+    kept = [c for c in data.get("cookies", []) if c.get("name") not in fresh]
+    data["cookies"] = kept + list(fresh.values())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def dig(data: Any, path: str) -> Any:
     """'data.list' 또는 'data.0.list' 같은 경로로 중첩 값을 꺼낸다."""
     if not path:
@@ -118,6 +149,51 @@ class ApiAdapter(Adapter):
             log.debug("세션 쿠키 %d개 로드", len(cookies))
 
     def fetch_month(self, year: int, month: int) -> list[Slot]:
+        try:
+            return self._fetch_month(year, month)
+        except LoginRequired:
+            if not self.source.login.enabled:
+                raise
+            # 세션이 만료됐을 뿐이므로 한 번 다시 로그인하고 재시도한다.
+            log.info("세션이 만료된 것 같습니다. 자동 재로그인을 시도합니다.")
+            self.login()
+            return self._fetch_month(year, month)
+
+    def login(self) -> None:
+        """아이디/비밀번호로 다시 로그인하고 갱신된 쿠키를 저장한다."""
+        login = self.source.login
+        payload = {
+            key: value.format(id=login.username, password=login.password)
+            for key, value in login.form.items()
+        }
+        kwargs: dict[str, Any] = {"timeout": self.timeout, "headers": login.headers or None}
+        if login.form_is_json:
+            kwargs["json"] = payload
+        else:
+            kwargs["data"] = payload
+        try:
+            response = self.session.request(login.method.upper(), login.url, **kwargs)
+        except requests.RequestException as exc:
+            raise LoginRequired(f"로그인 요청 실패: {exc}") from exc
+
+        if response.status_code >= 400:
+            raise LoginRequired(f"로그인 실패 (HTTP {response.status_code}).")
+        body = response.text[:4000]
+        for marker in login.failure_markers:
+            if marker and marker in body:
+                # 비밀번호가 틀린 것이므로 재시도해도 소용없다. 계정 잠김을 피하려면 여기서 멈춰야 한다.
+                raise LoginRequired(
+                    f"로그인에 실패했습니다(아이디/비밀번호 확인 필요): {marker!r} 가 응답에 있습니다."
+                )
+        if not self.session.cookies:
+            raise LoginRequired("로그인 응답에 쿠키가 없습니다. source.login 설정을 확인하세요.")
+        log.info("자동 재로그인 성공")
+        try:
+            save_cookies_to_storage_state(self.source.storage_state, self.session.cookies)
+        except OSError as exc:
+            log.warning("갱신된 세션을 저장하지 못했습니다: %s", exc)
+
+    def _fetch_month(self, year: int, month: int) -> list[Slot]:
         variables = template_vars(self.hall_code, year, month)
         url = render(self.api.url, variables)
         params = render(self.api.params, variables)

@@ -40,6 +40,23 @@ source:
   login_url: "https://s-wedding.samsungcard.com/login/UWDDWSCO02M1.jsp"
   login_required_markers: ["UWDDWSCO02M1", "로그인이 필요", "세션이 만료"]
 
+  # 세션이 만료되면 스스로 다시 로그인한다 (결혼도움방은 사이트 자체 아이디/비밀번호 로그인).
+  # 아이디/비밀번호는 여기 쓰지 말고 .env 의 WW_LOGIN_ID / WW_LOGIN_PW 로 넣으세요.
+  # url 과 form 필드명은 `wedding-watch discover` 가 discover/suggested_login.yaml 로 뽑아 줍니다.
+  login:
+    enabled: false
+    url: ""                      # 로그인 폼이 실제로 POST 하는 주소 (로그인 페이지 주소와 다를 수 있음)
+    method: "POST"
+    form:                        # {id} 와 {password} 자리표시자를 쓰세요
+      userId: "{id}"
+      userPw: "{password}"
+    form_is_json: false
+    failure_markers: ["비밀번호가 일치하지", "존재하지 않는", "다시 확인"]
+    # browser 모드에서만 쓰는 선택자
+    id_selector: "#userId"
+    password_selector: "#userPw"
+    submit_selector: "#btnLogin"
+
   # ▼▼▼ 아래 값은 `wedding-watch discover` 로 실제 요청을 캡처해서 채워야 합니다.
   #     결혼도움방은 임직원 로그인 전용이라 내부 API 주소가 공개돼 있지 않습니다.
   api:

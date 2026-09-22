@@ -4,7 +4,7 @@
 **2027년 5·6·9·10·11월**에 빈자리가 새로 나오면 **ntfy 푸시**로 즉시 알려줍니다.
 
 - 같은 빈자리는 **한 번만** 알립니다. 사라졌다가 다시 나오면 다시 알립니다.
-- 조회가 연속 실패하면(=로그인 세션 만료) **"점검 필요" 알림**을 보내서, 조용히 못 보고 지나치는 일을 막습니다.
+- 세션이 만료되면 **스스로 다시 로그인**합니다. 그래도 계속 실패하면 **"점검 필요" 알림**을 보내서, 조용히 못 보고 지나치는 일을 막습니다.
 - 매번 ±60초 흔들어(jitter) 초 단위로 똑같은 시각에 때리지 않습니다.
 
 ---
@@ -59,6 +59,9 @@ wedding-watch login
 
 브라우저가 열립니다. 결혼도움방에 로그인하고 예약 달력까지 들어간 뒤 터미널에서 Enter.
 쿠키가 `state/storage_state.json` 에 저장됩니다. **이 파일은 절대 커밋/공유하지 마세요** (`.gitignore` 에 이미 포함).
+
+쿠키는 보통 며칠이면 풀립니다. 매번 수동으로 다시 로그인하기 싫다면
+[자동 재로그인](#자동-재로그인-권장)을 켜세요.
 
 ## 3. 실제 API 주소 찾기 (`discover`)
 
@@ -131,6 +134,7 @@ wedding-watch run                # 10분마다 계속 확인 (Ctrl+C 로 종료)
 | `wedding-watch login` | 브라우저 로그인 후 세션 저장 |
 | `wedding-watch discover` | 실제 API 요청 캡처 → 설정 후보 생성 |
 | `wedding-watch test-notify` | ntfy 설정 테스트 |
+| `wedding-watch test-login` | 자동 재로그인 설정 테스트 |
 | `wedding-watch state` | 지금 기억 중인 빈자리 목록 |
 
 ## 설정 항목
@@ -150,6 +154,55 @@ wedding-watch run                # 10분마다 계속 확인 (Ctrl+C 로 종료)
 
 환경변수로도 덮어쓸 수 있습니다: `WW_NTFY_TOPIC`, `WW_NTFY_TOKEN`, `WW_HALL_CODE`,
 `WW_MONTHS`, `WW_INTERVAL_SECONDS`, `WW_SOURCE_MODE` …
+
+## 자동 재로그인 (권장)
+
+결혼도움방은 임직원 SSO 가 아니라 **사이트 자체 아이디/비밀번호 폼 로그인**이라, 세션이 만료되면
+앱이 알아서 다시 로그인할 수 있습니다. 이걸 켜두면 손 댈 일이 없어집니다.
+
+`discover` 를 실행할 때 **브라우저에서 로그인까지 직접 하면**, 로그인 폼의 **필드 이름만**
+기록해 `discover/suggested_login.yaml` 로 뽑아 줍니다. (아이디·비밀번호 **값은 저장하지 않습니다.**)
+
+그 내용을 `config.yaml` 에 옮기고:
+
+```yaml
+source:
+  login:
+    enabled: true
+    url: "https://s-wedding.samsungcard.com/login/loginProc.do"   # 폼이 POST 하는 주소
+    method: "POST"
+    form:
+      userId: "{id}"          # ← 실제 필드명으로
+      userPw: "{password}"
+```
+
+아이디/비밀번호는 **`config.yaml` 이 아니라 `.env`** 에 넣습니다 (`config.yaml` 은 `.gitignore` 에 있지만,
+습관적으로 비밀값은 분리해 두는 편이 안전합니다):
+
+```bash
+WW_LOGIN_ID=your-id
+WW_LOGIN_PW=your-password
+```
+
+확인:
+
+```bash
+wedding-watch test-login
+```
+
+동작 방식: 조회가 로그인 페이지로 튕기면 → 자동으로 한 번 로그인 → 같은 조회를 재시도.
+갱신된 쿠키는 `state/storage_state.json` 에 다시 저장돼서, 다음 실행(cron 포함)은 로그인 없이 바로 씁니다.
+
+> **비밀번호가 틀리면 재시도하지 않고 즉시 멈춥니다.** 10분마다 틀린 비밀번호로 계속 두드리면
+> 계정이 잠기기 때문입니다. 이때는 "⚠️ 확인 실패" 알림이 오니 `.env` 를 고치면 됩니다.
+
+`browser` 모드에서도 됩니다. 이때는 `url`/`form` 대신 선택자를 씁니다:
+
+```yaml
+    id_selector: "#userId"
+    password_selector: "#userPw"
+    submit_selector: "#btnLogin"
+```
 
 ## 계속 띄워두기
 
@@ -178,7 +231,9 @@ docker compose -f docker/compose.yaml up -d
 
 ## 세션이 만료되면
 
-쿠키는 보통 며칠이면 풀립니다. 연속 실패가 `failure_alert_after` 회에 도달하면
+[자동 재로그인](#자동-재로그인-권장)을 켰다면 앱이 알아서 처리합니다.
+
+켜지 않았다면 쿠키가 풀린 뒤 연속 실패가 `failure_alert_after` 회에 도달하면
 **"⚠️ 빈자리 확인 실패" 푸시**가 오니, 그때 `wedding-watch login` 을 다시 실행하면 됩니다.
 복구되면 "✅ 감시 복구됨" 알림이 한 번 옵니다.
 
@@ -205,8 +260,8 @@ wedding_watch/
   state.py        이미 알린 빈자리 기억 (원자적 저장)
   notify.py       ntfy 전송 (한글 제목 RFC2047 인코딩)
   watcher.py      감시 루프: 조회 → 비교 → 알림
-  discover.py     로그인 세션 저장 + API 캡처/분석
+  discover.py     로그인 세션 저장 + API/로그인폼 캡처 및 분석
   adapters/
-    api.py        내부 JSON API 직접 호출 (기본)
+    api.py        내부 JSON API 직접 호출 (기본) + 자동 재로그인
     browser.py    Playwright 로 달력 렌더링해 읽기
 ```

@@ -23,6 +23,10 @@ class Adapter(abc.ABC):
     def fetch_month(self, year: int, month: int) -> list[Slot]:
         """해당 연·월의 예약 가능 슬롯 목록."""
 
+    def login(self) -> None:
+        """아이디/비밀번호로 다시 로그인한다. 지원하지 않으면 예외."""
+        raise FetchError("이 어댑터는 자동 로그인을 지원하지 않습니다.")
+
     def close(self) -> None:
         """자원 정리. 기본은 아무것도 하지 않는다."""
 

@@ -7,7 +7,7 @@ import logging
 import sys
 from pathlib import Path
 
-from .adapters import FetchError, LoginRequired
+from .adapters import FetchError, LoginRequired, build_adapter
 from .config import Config, ConfigError, load_config
 from .models import sort_slots
 from .notify import Notifier
@@ -60,6 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
     discover.add_argument("--out", default="discover", help="캡처 결과를 저장할 디렉터리")
 
     sub.add_parser("test-notify", help="ntfy 설정이 맞는지 테스트 알림 발송")
+    sub.add_parser("test-login", help="자동 재로그인 설정이 맞는지 확인")
     sub.add_parser("state", help="현재 기억 중인 빈자리 상태 출력")
     return parser
 
@@ -125,6 +126,22 @@ def cmd_test_notify(config: Config) -> int:
     return 0 if ok else 1
 
 
+def cmd_test_login(config: Config) -> int:
+    if not config.source.login.enabled:
+        print("source.login.enabled 가 false 입니다. 자동 로그인을 먼저 설정하세요.", file=sys.stderr)
+        return 1
+    adapter = build_adapter(config)
+    try:
+        adapter.login()
+    except (FetchError, LoginRequired) as exc:
+        print(f"자동 로그인 실패: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        adapter.close()
+    print(f"자동 로그인 성공. 세션을 {config.source.storage_state} 에 저장했습니다.")
+    return 0
+
+
 def cmd_state(config: Config) -> int:
     state = SeenState(config.state_file)
     print(f"상태 파일: {state.path}")
@@ -159,6 +176,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_discover(config, args.url, args.out)
     if args.command == "test-notify":
         return cmd_test_notify(config)
+    if args.command == "test-login":
+        return cmd_test_login(config)
     if args.command == "state":
         return cmd_state(config)
     raise AssertionError(f"처리되지 않은 명령: {args.command}")

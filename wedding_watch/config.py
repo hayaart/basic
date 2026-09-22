@@ -99,6 +99,45 @@ class ResponseMap:
 
 
 @dataclass
+class LoginConfig:
+    """자동 재로그인 설정.
+
+    결혼도움방은 사이트 자체 아이디/비밀번호 폼 로그인이므로, 세션이 만료되면
+    앱이 스스로 다시 로그인할 수 있다. 아이디/비밀번호는 YAML 에 쓰지 말고
+    환경변수(WW_LOGIN_ID / WW_LOGIN_PW)로 넣는다.
+    """
+
+    enabled: bool = False
+    # 로그인 폼이 실제로 POST 하는 주소(form action). 로그인 페이지 주소와 다를 수 있다.
+    url: str = ""
+    method: str = "POST"
+    # 폼 필드명 -> 값. {id} 와 {password} 자리표시자를 쓴다.
+    form: dict[str, str] = field(default_factory=dict)
+    form_is_json: bool = False
+    headers: dict[str, str] = field(default_factory=dict)
+    # 응답 본문에 이 문구가 있으면 로그인 실패로 본다.
+    failure_markers: list[str] = field(
+        default_factory=lambda: ["비밀번호가 일치하지", "존재하지 않는", "다시 확인"]
+    )
+    # browser 모드에서 폼을 채울 때 쓰는 선택자.
+    id_selector: str = ""
+    password_selector: str = ""
+    submit_selector: str = ""
+    # 환경변수로만 채워진다.
+    username: str | None = None
+    password: str | None = None
+
+    def validate(self) -> None:
+        if not self.enabled:
+            return
+        if not self.username or not self.password:
+            raise ConfigError(
+                "자동 로그인이 켜져 있지만 아이디/비밀번호가 없습니다. "
+                ".env 에 WW_LOGIN_ID 와 WW_LOGIN_PW 를 넣으세요 (config.yaml 에는 쓰지 마세요)."
+            )
+
+
+@dataclass
 class ApiSourceConfig:
     url: str = ""
     method: str = "GET"
@@ -146,6 +185,7 @@ class SourceConfig:
     login_required_markers: list[str] = field(
         default_factory=lambda: ["로그인", "login", "UWDDWSCO02M1"]
     )
+    login: LoginConfig = field(default_factory=LoginConfig)
     api: ApiSourceConfig = field(default_factory=ApiSourceConfig)
     browser: BrowserSourceConfig = field(default_factory=BrowserSourceConfig)
 
@@ -156,6 +196,17 @@ class SourceConfig:
             self.api.validate()
         else:
             self.browser.validate()
+        self.login.validate()
+        if self.login.enabled:
+            if self.mode == "api" and not self.login.url:
+                raise ConfigError(
+                    "source.login.url 이 비어 있습니다. 로그인 폼이 POST 하는 주소를 넣으세요 "
+                    "(`wedding-watch discover` 가 캡처해 줍니다)."
+                )
+            if self.mode == "browser" and not (self.login.id_selector and self.login.password_selector):
+                raise ConfigError(
+                    "browser 모드 자동 로그인에는 source.login.id_selector 와 password_selector 가 필요합니다."
+                )
 
 
 @dataclass
@@ -196,6 +247,7 @@ _NESTED: dict[tuple[type, str], type] = {
     (Config, "poll"): PollConfig,
     (Config, "source"): SourceConfig,
     (Config, "ntfy"): NtfyConfig,
+    (SourceConfig, "login"): LoginConfig,
     (SourceConfig, "api"): ApiSourceConfig,
     (SourceConfig, "browser"): BrowserSourceConfig,
     (ApiSourceConfig, "response"): ResponseMap,
@@ -216,6 +268,8 @@ _ENV_OVERRIDES: dict[str, tuple[tuple[str, ...], Any]] = {
     "WW_STORAGE_STATE": (("source", "storage_state"), str),
     "WW_STATE_FILE": (("state_file",), str),
     "WW_SOURCE_MODE": (("source", "mode"), str),
+    "WW_LOGIN_ID": (("source", "login", "username"), str),
+    "WW_LOGIN_PW": (("source", "login", "password"), str),
 }
 
 
