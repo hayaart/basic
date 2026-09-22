@@ -1,0 +1,4 @@
+# 윈도우 PowerShell 5.1 은 .ps1 을 CRLF 로 기대한다. 체크아웃 시 항상 CRLF 로.
+*.ps1 text eol=crlf
+# 셸 스크립트에 CR 이 섞이면 bash 가 깨진다. 항상 LF 로.
+*.sh text eol=lf
