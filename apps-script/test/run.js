@@ -39,7 +39,8 @@ function createRuntime(site, store) {
       getProjectTriggers: () =>
         (site.triggerOn === false ? [] : [{ getHandlerFunction: () => 'checkOpenings' }]),
     },
-    ContentService: { createTextOutput: t => ({ getContent: () => t }) },
+    // 텔레그램은 리디렉션을 따라가지 않으므로 ContentService 가 아니라 HtmlService 로 답한다.
+    HtmlService: { createHtmlOutput: t => ({ getContent: () => t }) },
     Session: { getEffectiveUser: () => ({ getEmail: () => 'me@example.com' }) },
     MailApp: {
       sendEmail(opts) {
@@ -710,6 +711,26 @@ check('상태판에 버튼 있음', lastStatus.length === 1 && lastStatus[0].but
 tick();
 check('고쳐 쓸 때도 버튼 유지', lastStatus[0] && lastStatus[0].edit && lastStatus[0].buttons,
   JSON.stringify(lastStatus.map(x => x.edit + '/' + x.buttons)));
+
+// ───────── 하루 실행 시간 ─────────
+
+console.log('\n[실행시간] 상태판에 하루 사용량을 적어 한도를 눈에 보이게 한다');
+channelSetup({ TELEGRAM_TOKEN: 't', TELEGRAM_CHAT_ID: '1' });
+site.open = {};
+store.lastRunMs = '20000';   // 1회 20초
+tick();
+check('1회 시간 표시', /1회 20초/.test(lastStatus[0].text), lastStatus[0] && lastStatus[0].text);
+check('하루 사용량 계산 (20초 × 144회 = 48분)', /하루 약 48분/.test(lastStatus[0].text),
+  lastStatus[0] && lastStatus[0].text);
+check('한도도 함께', /한도 90분/.test(lastStatus[0].text));
+check('여유 있으면 경고 없음', !/한도에 가깝/.test(lastStatus[0].text));
+
+store.lastRunMs = '40000';   // 1회 40초 → 하루 96분
+tick();
+check('한도를 넘길 것 같으면 경고', /한도에 가깝/.test(lastStatus[0].text),
+  lastStatus[0] && lastStatus[0].text);
+
+check('실행 시간을 매번 기록', Number(store.lastRunMs) >= 0, store.lastRunMs);
 
 console.log('\n' + (failures ? failures + '개 실패' : '전부 통과'));
 process.exit(failures ? 1 : 0);

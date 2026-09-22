@@ -49,8 +49,12 @@ var FAIL_ALERT_AFTER = 3;      // 전체 조회가 이만큼 연속 실패하면
 var PARTIAL_ALERT_AFTER = 12;  // 일부 달만 계속 못 볼 때의 기준 (12회 = 약 2시간)
 var HEARTBEAT_HOURS  = 24;     // 이 시간마다 '살아있음' 알림. 0 으로 두면 끕니다.
 var MAX_LINES = 30;            // 알림 한 통에 적는 최대 날짜 수
-var JITTER_MS = 90 * 1000;     // 매 실행을 0~90초 무작위로 늦춰 규칙적인 패턴을 피한다
-var GAP_MS    = 1200;          // 달과 달 사이 간격
+// 지터와 간격은 그대로 '스크립트 실행 시간' 으로 잡힌다. 구글 무료 계정은 트리거 실행
+// 시간이 하루 90분으로 묶여 있어서, 넉넉히 잡아두면 한도를 넘겨 감시가 통째로 멈춘다.
+var JITTER_MS = 10 * 1000;     // 매 실행을 0~10초 무작위로 늦춰 규칙적인 패턴을 피한다
+var GAP_MS    = 300;           // 달과 달 사이 간격
+var INTERVAL_MINUTES = 10;           // createTrigger 가 잡는 주기. 하루 사용량을 가늠하는 데 쓴다.
+var DAILY_RUNTIME_BUDGET_MIN = 90;   // 구글 무료 계정의 하루 트리거 실행 시간 한도
 
 // 조회된 날짜의 대부분이 '열림'으로 보이면 파싱이 깨졌을 수 있다. 판단 기준.
 var SUSPICIOUS_MIN_DAYS  = 8;
@@ -68,11 +72,13 @@ function checkOpenings() {
     console.log('이전 실행이 아직 돌고 있어 이번 회차는 건너뜁니다.');
     return;
   }
+  var started = Date.now();
   try {
     Utilities.sleep(Math.floor(Math.random() * JITTER_MS));
     runCheck_();
   } finally {
     lock.releaseLock();
+    PropertiesService.getScriptProperties().setProperty('lastRunMs', String(Date.now() - started));
   }
 }
 
@@ -236,7 +242,7 @@ function createTrigger() {
 /** 기억해 둔 상태를 지운다. 다음 실행에서 현재 열린 날을 전부 새 빈자리로 다시 알립니다. */
 function resetState() {
   var props = PropertiesService.getScriptProperties();
-  ['openSet', 'hallCode', 'statusMsgId', 'statusMsgChat', 'failCount', 'failAlerted',
+  ['openSet', 'hallCode', 'statusMsgId', 'statusMsgChat', 'lastRunMs', 'failCount', 'failAlerted',
    'partialCount', 'partialAlerted', 'lastError', 'lastSuccessAt', 'lastHeartbeatAt']
     .forEach(function (k) { props.deleteProperty(k); });
   console.log('상태를 초기화했습니다.');
@@ -254,7 +260,9 @@ function doPost(e) {
     console.error('텔레그램 메시지 처리 실패: ' + err.message);
   }
   // 텔레그램에는 항상 200 을 준다. 안 그러면 같은 메시지를 계속 다시 보낸다.
-  return ContentService.createTextOutput('');
+  // ContentService 로 답하면 구글이 302 리디렉션을 끼워 넣는데, 텔레그램은 리디렉션을
+  // 따라가지 않아 'Wrong response from the webhook: 302 Found' 로 실패한다.
+  return HtmlService.createHtmlOutput('');
 }
 
 function handleTelegramUpdate_(e) {
@@ -475,7 +483,9 @@ function setupTelegramCommands() {
   bots.forEach(function (which) {
     var hook = url + (url.indexOf('?') === -1 ? '?' : '&') + 's=' + secret + '&b=' + which;
     var res = telegramApi_('setWebhook', {
-      url: hook, allowed_updates: ['message', 'callback_query']
+      url: hook, allowed_updates: ['message', 'callback_query'],
+      // 그동안 실패해 쌓여 있던 메시지가 한꺼번에 쏟아지지 않게 버린다.
+      drop_pending_updates: true
     }, which);
     if (!res.ok) {
       console.log((which === 'main' ? '알림 봇' : '상태 봇') + ' 설정 실패: ' +
@@ -509,14 +519,24 @@ function checkTelegramCommands() {
   if (url) {
     // 텔레그램이 부르는 것과 같은 방식으로 우리가 직접 불러 본다.
     try {
+      // 텔레그램은 리디렉션을 따라가지 않는다. 그러니 우리도 따라가지 말고 봐야
+      // 텔레그램이 보는 것과 같은 응답을 본다.
       var res = UrlFetchApp.fetch(url + (url.indexOf('?') === -1 ? '?' : '&') + 's=test', {
         method: 'post', contentType: 'application/json', payload: '{}',
-        muteHttpExceptions: true
+        muteHttpExceptions: true, followRedirects: false
       });
       var code = res.getResponseCode();
-      console.log('웹앱 응답 코드: ' + code +
-                  (code === 200 ? ' ✅ 잘 열립니다'
-                                : ' ❌ 배포할 때 액세스 권한을 "모든 사용자" 로 하셨는지 확인하세요'));
+      if (code === 200) {
+        console.log('웹앱 응답 코드: 200 ✅ 텔레그램이 받을 수 있는 응답입니다');
+      } else if (code === 302 || code === 301) {
+        var to = res.getAllHeaders()['Location'] || res.getAllHeaders()['location'] || '';
+        console.log('웹앱 응답 코드: ' + code + ' ❌ 텔레그램은 리디렉션을 따라가지 않습니다');
+        console.log(/accounts\.google\.com|ServiceLogin/.test(String(to))
+          ? '   → 로그인 화면으로 보냅니다. 배포할 때 액세스 권한을 "모든 사용자" 로 하세요.'
+          : '   → 배포된 코드가 옛 버전일 수 있습니다. 배포 관리에서 "새 버전" 으로 다시 배포하세요.');
+      } else {
+        console.log('웹앱 응답 코드: ' + code + ' ❌ 배포 주소와 액세스 권한을 확인하세요');
+      }
     } catch (e) {
       console.log('웹앱을 부르지 못했습니다: ' + e.message);
     }
@@ -590,6 +610,8 @@ function showSettings() {
   });
   console.log('자동 실행 트리거: ' + (triggers.length ? '켜짐' : '꺼짐 — createTrigger 를 실행하세요'));
   console.log('텔레그램 메시지 응답: ' + (prop_('WEBHOOK_SECRET') ? '켜짐' : '꺼짐'));
+  var runtime = dailyRuntimeText_();
+  if (runtime) console.log('실행 시간: ' + runtime);
 }
 
 /** 감시 대상을 기본값(삼성금융연수원)으로 되돌린다. */
@@ -950,6 +972,8 @@ function buildStatusText_(scan, openNow) {
     lines.push('');
     lines.push('원인: ' + String(scan.errors.join(' | ')).slice(0, 200));
   }
+  var runtime = dailyRuntimeText_();
+  if (runtime) lines.push('사용 시간: ' + runtime);
   lines.push('');
   lines.push('10분마다 이 메시지가 갱신됩니다. 시각이 안 바뀌면 멈춘 것입니다.');
   return lines.join('\n');
@@ -1057,6 +1081,20 @@ function maybeHeartbeat_(props, openCount) {
 function prop_(key) {
   var value = PropertiesService.getScriptProperties().getProperty(key);
   return value ? String(value).trim() : '';
+}
+
+/**
+ * 하루에 쓰는 트리거 실행 시간이 얼마쯤 되는지.
+ * 구글 무료 계정은 하루 90분이 한도이고, 넘기면 트리거를 통째로 꺼버린다.
+ * 그렇게 멈추면 실패 알림조차 못 오므로, 눈에 보이는 곳에 적어 둔다.
+ */
+function dailyRuntimeText_() {
+  var ms = Number(PropertiesService.getScriptProperties().getProperty('lastRunMs') || 0);
+  if (!ms) return '';
+  var perRun = Math.round(ms / 1000);
+  var perDay = Math.round((ms / 1000) * (24 * 60 / INTERVAL_MINUTES) / 60);
+  return '1회 ' + perRun + '초 · 하루 약 ' + perDay + '분 / 한도 ' + DAILY_RUNTIME_BUDGET_MIN + '분' +
+         (perDay > DAILY_RUNTIME_BUDGET_MIN * 0.8 ? ' ⚠️ 한도에 가깝습니다' : '');
 }
 
 /** 서울 기준 이번 달 ('2026-09'). */
