@@ -18,3 +18,13 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e ".[dev]"
       - run: pytest -q
+
+  apps-script:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      # Code.gs 를 vm 으로 읽어 돌리므로 문법 오류도 여기서 잡힌다.
+      - run: node apps-script/test/run.js
