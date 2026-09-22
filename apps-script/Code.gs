@@ -270,29 +270,59 @@ function handleTelegramUpdate_(e) {
   // 답이 늦으면 텔레그램이 같은 메시지를 다시 보낸다. 같은 것에 두 번 답하지 않는다.
   if (!isNewUpdate_(which, update.update_id)) return;
 
+  var pressed = update.callback_query;
+  if (pressed) {
+    // 버튼을 누른 것. 먼저 누름을 접수해서 버튼의 대기 표시를 없앤다.
+    try { telegramApi_('answerCallbackQuery', { callback_query_id: pressed.id }, which); }
+    catch (err) { /* 접수 실패는 답장을 막을 일이 아니다 */ }
+    if (!pressed.message || !pressed.message.chat) return;
+    if (String(pressed.message.chat.id) !== tgChat_(which)) return;
+    // 버튼에 담아둔 말을, 그 말을 직접 보낸 것과 똑같이 처리한다.
+    respondTo_(which, String(pressed.data || ''));
+    return;
+  }
+
   var msg = update.message || update.edited_message;
   if (!msg || !msg.chat || !msg.text) return;
   // 내 대화방에서 온 것만 받는다.
   if (String(msg.chat.id) !== tgChat_(which)) return;
+  respondTo_(which, String(msg.text).trim());
+}
 
-  var text = String(msg.text).trim();
+/** 받은 말 한 마디에 답한다. 직접 입력한 것이든 버튼을 누른 것이든 같은 길을 탄다. */
+function respondTo_(which, text) {
   var hall = matchHall_(text);
 
   if (hall) {
     reply_(which, '🔎 ' + hall.name + ' 을(를) 지금 찾아보고 있습니다. 20초쯤 걸립니다…');
-    reply_(which, lookupHallText_(hall));
+    reply_(which, lookupHallText_(hall), true);
   } else if (/^\/?(확인|체크|check|refresh)/i.test(text)) {
     reply_(which, '🔎 지금 확인하고 있습니다. 20초쯤 걸립니다…');
-    reply_(which, runOnDemand_());
+    reply_(which, runOnDemand_(), true);
   } else if (/^\/?(도움|help|start)/i.test(text)) {
     var names = HALLS.map(function (h) { return '• ' + h.keys[0] + ' — ' + h.name + ' 지금 찾아보기'; });
-    reply_(which, ['보낼 수 있는 말:', '',
+    reply_(which, ['보낼 수 있는 말 (아래 버튼을 눌러도 됩니다):', '',
                    '• 상태 — 지금 상태 보기 (자동 감시: ' + HALL_NAME + ')',
                    '• 확인 — 감시 대상을 지금 바로 다시 확인'].concat(names).concat(
-                  ['', '아무 말이나 보내도 상태를 알려드립니다.']).join('\n'));
+                  ['', '아무 말이나 보내도 상태를 알려드립니다.']).join('\n'), true);
   } else {
-    reply_(which, storedStatusText_());
+    reply_(which, storedStatusText_(), true);
   }
+}
+
+/**
+ * 답장에 붙일 버튼들.
+ * callback_data 에 넣은 말이 그대로 respondTo_ 로 들어가므로,
+ * 버튼을 누르는 것과 그 말을 직접 입력하는 것이 완전히 같다.
+ */
+function keyboard_() {
+  return {
+    inline_keyboard: [
+      HALLS.map(function (h) { return { text: h.name, callback_data: h.keys[0] }; }),
+      [{ text: '🔄 상태', callback_data: '상태' },
+       { text: '🔁 지금 확인', callback_data: '확인' }]
+    ]
+  };
 }
 
 /** 메시지에 예식장 이름이 들어 있으면 그 예식장을 돌려준다. */
@@ -361,10 +391,12 @@ function isNewUpdate_(which, id) {
   return true;
 }
 
-function reply_(which, text) {
-  telegramApi_('sendMessage', {
+function reply_(which, text, withButtons) {
+  var payload = {
     chat_id: tgChat_(which), text: text, disable_web_page_preview: true
-  }, which);
+  };
+  if (withButtons) payload.reply_markup = keyboard_();
+  telegramApi_('sendMessage', payload, which);
 }
 
 /** 요청을 받아 지금 바로 한 번 확인한다. 결과 문장을 돌려준다. */
@@ -442,7 +474,9 @@ function setupTelegramCommands() {
   var bots = hasStatusBot_() ? ['main', 'status'] : ['main'];
   bots.forEach(function (which) {
     var hook = url + (url.indexOf('?') === -1 ? '?' : '&') + 's=' + secret + '&b=' + which;
-    var res = telegramApi_('setWebhook', { url: hook, allowed_updates: ['message'] }, which);
+    var res = telegramApi_('setWebhook', {
+      url: hook, allowed_updates: ['message', 'callback_query']
+    }, which);
     if (!res.ok) {
       console.log((which === 'main' ? '알림 봇' : '상태 봇') + ' 설정 실패: ' +
                   JSON.stringify(res).slice(0, 300));
@@ -815,7 +849,7 @@ function updateStatusMessage_(props, scan, openNow) {
     try {
       telegramApi_('editMessageText', {
         chat_id: chat, message_id: Number(id),
-        text: text, disable_web_page_preview: true
+        text: text, disable_web_page_preview: true, reply_markup: keyboard_()
       }, 'status');
       return;
     } catch (e) {
@@ -825,7 +859,7 @@ function updateStatusMessage_(props, scan, openNow) {
   }
   try {
     var res = telegramApi_('sendMessage', {
-      chat_id: chat, text: text,
+      chat_id: chat, text: text, reply_markup: keyboard_(),
       disable_web_page_preview: true, disable_notification: true
     }, 'status');
     if (res && res.result && res.result.message_id) {

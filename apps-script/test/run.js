@@ -24,6 +24,7 @@ const CODE = fs.readFileSync(path.join(__dirname, '..', 'Code.gs'), 'utf8');
 function createRuntime(site, store) {
   const sent = [];
   const status = [];
+  const acked = [];
   const ctx = {
     console: { log() {}, warn() {}, error() {} },
     PropertiesService: {
@@ -73,15 +74,25 @@ function createRuntime(site, store) {
           }
           const body = JSON.parse(opts.payload);
           const bot = (url.match(/\/bot([^/]+)\//) || [])[1];
+          if (url.indexOf('answerCallbackQuery') !== -1) {
+            acked.push(body.callback_query_id);
+            return { getResponseCode: () => 200, getContentText: () => '{"ok":true}' };
+          }
           const edit = url.indexOf('editMessageText') !== -1;
           if (edit && site.editFails) {
             return { getResponseCode: () => 400, getContentText: () => '{"ok":false,"description":"message to edit not found"}' };
           }
           // 고정해두는 살아있음 메시지는 알림이 아니라 따로 센다.
           if (edit || /이 메시지가 갱신됩니다/.test(body.text)) {
-            status.push({ edit: edit, id: body.message_id, text: body.text, bot: bot });
+            status.push({
+              edit: edit, id: body.message_id, text: body.text, bot: bot,
+              buttons: !!body.reply_markup,
+            });
           } else {
-            sent.push({ channel: 'telegram', title: body.text.split('\n')[0], body: body.text, bot: bot });
+            sent.push({
+              channel: 'telegram', title: body.text.split('\n')[0], body: body.text, bot: bot,
+              buttons: body.reply_markup ? body.reply_markup.inline_keyboard : null,
+            });
           }
           site.nextMessageId = (site.nextMessageId || 100) + 1;
           return {
@@ -130,7 +141,7 @@ function createRuntime(site, store) {
   };
   vm.createContext(ctx);
   vm.runInContext(CODE, ctx);
-  return { ctx, sent, status };
+  return { ctx, sent, status, acked };
 }
 
 /**
@@ -634,6 +645,71 @@ console.log('\n[예식장 문의] 도움말에 예식장 이름이 나온다');
 out = post('도움');
 check('세 곳 모두 안내', /서초/.test(out[0].body) && /금융/.test(out[0].body) && /e&a/i.test(out[0].body),
   out[0] && out[0].body);
+
+// ───────── 버튼 ─────────
+
+let lastAcked = [];
+/** 버튼을 누른 것을 흉내 낸다. */
+function press(data, opts) {
+  opts = opts || {};
+  site.requested = [];
+  const { ctx, sent, acked } = createRuntime(site, store);
+  ctx.doPost({
+    parameter: { s: store.WEBHOOK_SECRET, b: opts.b },
+    postData: { contents: JSON.stringify({
+      update_id: 'updateId' in opts ? opts.updateId : ++updateId,
+      callback_query: {
+        id: 'cb1', data: data,
+        message: { chat: { id: opts.chat || 1 } },
+      },
+    })},
+  });
+  lastAcked = acked;
+  return sent;
+}
+
+console.log('\n[버튼] 답장에 예식장 버튼이 붙어 온다');
+channelSetup({ TELEGRAM_TOKEN: 't', TELEGRAM_CHAT_ID: '1', WEBHOOK_SECRET: 'secret' });
+site.open = {};
+site.openByHall = { '5': { '2027-05': [1] }, '1': { '2027-09': [4] } };
+tick();
+out = post('상태');
+check('버튼이 붙어 있음', out[0] && out[0].buttons, JSON.stringify(out[0] && out[0].buttons));
+const labels = out[0].buttons.reduce((a, row) => a.concat(row.map(b => b.text)), []);
+check('세 예식장이 버튼으로', /서초사옥/.test(labels.join()) && /삼성E&A/.test(labels.join()) &&
+  /삼성금융연수원/.test(labels.join()), labels.join(' | '));
+const datas = out[0].buttons.reduce((a, row) => a.concat(row.map(b => b.callback_data)), []);
+check('누르면 보낼 말이 담겨 있음', datas.indexOf('서초') !== -1, datas.join(' | '));
+
+console.log('\n[버튼] 누르면 그 말을 직접 보낸 것과 똑같이 동작한다');
+out = press('서초');
+check('누름을 먼저 접수', lastAcked.length === 1, JSON.stringify(lastAcked));
+check('찾는 중 + 결과, 2통', out.length === 2, JSON.stringify(out.map(p => p.body.slice(0, 22))));
+check('서초사옥(1번 홀)을 조회', site.requested.every(r => r.startsWith('1/')), site.requested[0]);
+check('결과에도 버튼이 붙음', !!out[1].buttons);
+
+console.log('\n[버튼] 상태 버튼은 사이트를 부르지 않는다');
+out = press('상태');
+check('답장 1통', out.length === 1, JSON.stringify(out.map(p => p.body.slice(0, 20))));
+check('사이트 호출 없음', site.requested.length === 0, JSON.stringify(site.requested));
+
+console.log('\n[버튼] 남의 대화방에서 누른 것은 무시한다');
+check('무응답', press('서초', { chat: 99 }).length === 0);
+
+console.log('\n[버튼] 같은 누름이 다시 와도 두 번 답하지 않는다');
+check('처음엔 답함', press('상태', { updateId: 7001 }).length === 1);
+check('재전송은 무시', press('상태', { updateId: 7001 }).length === 0);
+
+console.log('\n[버튼] 고정 상태판에도 버튼이 달린다');
+channelSetup({ TELEGRAM_TOKEN: 't', TELEGRAM_CHAT_ID: '1' });
+site.open = { '2027-05': [1] };
+site.openByHall = null;
+tick();
+check('상태판에 버튼 있음', lastStatus.length === 1 && lastStatus[0].buttons,
+  JSON.stringify(lastStatus.map(x => x.buttons)));
+tick();
+check('고쳐 쓸 때도 버튼 유지', lastStatus[0] && lastStatus[0].edit && lastStatus[0].buttons,
+  JSON.stringify(lastStatus.map(x => x.edit + '/' + x.buttons)));
 
 console.log('\n' + (failures ? failures + '개 실패' : '전부 통과'));
 process.exit(failures ? 1 : 0);
