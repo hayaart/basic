@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wedding-watch"
+version = "0.1.0"
+description = "삼성카드 결혼도움방 웨딩홀(삼성금융연수원) 빈자리 감시 및 ntfy 푸시 알림"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+browser = ["playwright>=1.44"]
+dev = ["pytest>=8.0", "responses>=0.25"]
+
+[project.scripts]
+wedding-watch = "wedding_watch.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["wedding_watch*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

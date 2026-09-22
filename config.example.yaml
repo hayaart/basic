@@ -1,0 +1,71 @@
+# 삼성카드 결혼도움방 - 삼성금융연수원 빈자리 감시 설정
+# 이 파일을 config.yaml 로 복사한 뒤 수정하세요.  cp config.example.yaml config.yaml
+
+target:
+  hall_code: "5"                 # 삼성금융연수원 홀 코드
+  hall_name: "삼성금융연수원"
+  months:                        # 노리는 예식 월 (YYYY-MM)
+    - "2027-05"
+    - "2027-06"
+    - "2027-09"
+    - "2027-10"
+    - "2027-11"
+  weekdays: []                   # 비우면 전 요일. 주말만 원하면 [5, 6] (0=월 … 6=일)
+  exclude_dates: []              # 제외할 날짜: ["2027-05-05"]
+
+poll:
+  interval_seconds: 600          # 10분
+  jitter_seconds: 60             # 매번 ±60초 흔들어 규칙적인 패턴을 피한다
+  timeout_seconds: 30
+  failure_alert_after: 3         # 3회 연속 실패하면 '점검 필요' 알림 (세션 만료 감지)
+  notify_on_disappear: false     # 빈자리가 사라질 때도 알림을 받을지
+  heartbeat_hours: 0             # 예: 12 로 두면 12시간마다 '살아있음' 알림
+
+ntfy:
+  topic: "samsung-wedding-ALEATORIO"   # 반드시 남이 못 맞출 임의 문자열로 바꾸세요
+  server: "https://ntfy.sh"
+  priority: "high"
+  tags: ["wedding_ring", "bell"]
+  click_url: "https://s-wedding.samsungcard.com/login/UWDDWSCO02M1.jsp"
+  # token: 환경변수 WW_NTFY_TOKEN 으로 넣으세요 (비공개 토픽을 쓸 때)
+
+state_file: "state/seen.json"
+
+source:
+  # api    = 사이트 내부 JSON API 를 직접 호출 (가볍고 빠름, 권장)
+  # browser = Playwright 로 달력 화면을 렌더링해 읽음 (API 를 못 찾았을 때)
+  mode: "api"
+
+  storage_state: "state/storage_state.json"   # `wedding-watch login` 이 만드는 로그인 쿠키
+  login_url: "https://s-wedding.samsungcard.com/login/UWDDWSCO02M1.jsp"
+  login_required_markers: ["UWDDWSCO02M1", "로그인이 필요", "세션이 만료"]
+
+  # ▼▼▼ 아래 값은 `wedding-watch discover` 로 실제 요청을 캡처해서 채워야 합니다.
+  #     결혼도움방은 임직원 로그인 전용이라 내부 API 주소가 공개돼 있지 않습니다.
+  api:
+    url: ""                      # 예: "https://s-wedding.samsungcard.com/.../selectHallSchedule.json"
+    method: "POST"
+    headers:
+      Referer: "https://s-wedding.samsungcard.com/"
+    params: {}
+    body:                        # {hall_code} {year} {month} {ym} 자리표시자를 쓸 수 있습니다
+      WEDG_HLL_C: "{hall_code}"
+      SRCH_YM: "{ym}"
+    body_is_json: true
+    response:
+      items_path: ""             # 예: "data.scheduleList"
+      date_field: "WEDG_YMD"
+      time_field: null           # 예식 시간대가 따로 오면 그 필드명
+      status_field: "RSVT_PSBL_YN"
+      available_values: ["Y"]    # '예약 가능'에 해당하는 값만
+      label_field: null
+      date_format: null          # 예: "%Y%m%d" (자동 인식이 실패할 때만)
+
+  browser:
+    url_template: ""             # 예: "https://s-wedding.samsungcard.com/...?hallCd={hall_code}&ym={ym}"
+    wait_selector: ".calendar"
+    day_selector: "td.able, td.possible"
+    date_attr: "data-date"       # 없으면 null 로 두면 셀 텍스트에서 일자를 읽습니다
+    time_selector: null
+    headless: true
+    extra_wait_ms: 1500

@@ -1,0 +1,12 @@
+services:
+  wedding-watch:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: wedding-watch
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    volumes:
+      - ../config.yaml:/app/config.yaml:ro
+      - ../state:/app/state          # 로그인 쿠키 + 알림 기록
