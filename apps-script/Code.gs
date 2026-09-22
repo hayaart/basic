@@ -25,8 +25,15 @@
  *************************************************************/
 
 // 아래는 기본값이고, 스크립트 속성에 같은 이름을 넣으면 그쪽이 우선합니다.
-var HALL_CODE = prop_('HALL_CODE') || '1';    // 1 서초사옥 · 3 삼성E&A · 5 삼성금융연수원
-var HALL_NAME = prop_('HALL_NAME') || '서초사옥';
+var HALL_CODE = prop_('HALL_CODE') || '5';    // 1 서초사옥 · 3 삼성E&A · 5 삼성금융연수원
+var HALL_NAME = prop_('HALL_NAME') || '삼성금융연수원';
+
+// 텔레그램에서 이름을 부르면 그때만 조회해 주는 예식장들. (자동 감시는 위의 한 곳만)
+var HALLS = [
+  { code: '1', name: '서초사옥',      keys: ['서초'] },
+  { code: '3', name: '삼성E&A',       keys: ['e&a', 'ena', '이엔에이', '삼성e'] },
+  { code: '5', name: '삼성금융연수원', keys: ['금융', '연수원'] }
+];
 // 월을 지정하지 않으면(기본) 예약을 받는 달을 스스로 찾아 전부 감시한다.
 var FIXED_MONTHS = parseMonths_(prop_('MONTHS'));
 var MAX_MONTHS_AHEAD = Number(prop_('MAX_MONTHS_AHEAD')) || 24;
@@ -132,7 +139,7 @@ function runCheck_() {
  * MONTHS 를 지정했으면 그 달만 본다. 지정하지 않았으면 이번 달부터 앞으로 가면서,
  * 예약을 아예 안 받는 달이 연달아 나오는 지점을 예약 가능 구간의 끝으로 보고 멈춘다.
  */
-function scanMonths_() {
+function scanMonths_(hallCode) {
   var result = { open: [], total: 0, failed: [], errors: [], ok: {}, checked: 0, fatal: false };
 
   var cookie;
@@ -148,7 +155,7 @@ function scanMonths_() {
   if (FIXED_MONTHS) {
     FIXED_MONTHS.forEach(function (ym, i) {
       if (i) Utilities.sleep(GAP_MS);
-      checkMonth_(cookie, ym, result);
+      checkMonth_(cookie, ym, result, hallCode);
     });
     return result;
   }
@@ -158,7 +165,7 @@ function scanMonths_() {
   for (var i = 0; i < MAX_MONTHS_AHEAD && empty < STOP_AFTER_EMPTY; i++) {
     if (i) Utilities.sleep(GAP_MS);
     var before = result.total;
-    checkMonth_(cookie, ym, result);
+    checkMonth_(cookie, ym, result, hallCode);
     if (!result.ok[ym]) {
       // 조회 실패는 '빈 달'이 아니다. 여기서 멈추면 뒤쪽 달을 통째로 놓친다.
     } else if (result.total === before) {
@@ -172,10 +179,10 @@ function scanMonths_() {
 }
 
 /** 한 달을 조회해 결과에 합친다. */
-function checkMonth_(cookie, ym, result) {
+function checkMonth_(cookie, ym, result, hallCode) {
   result.checked++;
   try {
-    var month = fetchOpenDays_(cookie, ym);
+    var month = fetchOpenDays_(cookie, ym, false, hallCode);
     result.open = result.open.concat(month.open);
     result.total += month.total;
     result.ok[ym] = true;
@@ -269,17 +276,78 @@ function handleTelegramUpdate_(e) {
   if (String(msg.chat.id) !== tgChat_(which)) return;
 
   var text = String(msg.text).trim();
-  if (/^\/?(확인|체크|check|refresh)/i.test(text)) {
+  var hall = matchHall_(text);
+
+  if (hall) {
+    reply_(which, '🔎 ' + hall.name + ' 을(를) 지금 찾아보고 있습니다. 20초쯤 걸립니다…');
+    reply_(which, lookupHallText_(hall));
+  } else if (/^\/?(확인|체크|check|refresh)/i.test(text)) {
     reply_(which, '🔎 지금 확인하고 있습니다. 20초쯤 걸립니다…');
     reply_(which, runOnDemand_());
   } else if (/^\/?(도움|help|start)/i.test(text)) {
+    var names = HALLS.map(function (h) { return '• ' + h.keys[0] + ' — ' + h.name + ' 지금 찾아보기'; });
     reply_(which, ['보낼 수 있는 말:', '',
-                   '• 상태 — 지금 상태 보기',
-                   '• 확인 — 지금 바로 다시 확인',
-                   '', '아무 말이나 보내도 상태를 알려드립니다.'].join('\n'));
+                   '• 상태 — 지금 상태 보기 (자동 감시: ' + HALL_NAME + ')',
+                   '• 확인 — 감시 대상을 지금 바로 다시 확인'].concat(names).concat(
+                  ['', '아무 말이나 보내도 상태를 알려드립니다.']).join('\n'));
   } else {
     reply_(which, storedStatusText_());
   }
+}
+
+/** 메시지에 예식장 이름이 들어 있으면 그 예식장을 돌려준다. */
+function matchHall_(text) {
+  var lower = String(text).toLowerCase();
+  for (var i = 0; i < HALLS.length; i++) {
+    for (var j = 0; j < HALLS[i].keys.length; j++) {
+      if (lower.indexOf(HALLS[i].keys[j]) !== -1) return HALLS[i];
+    }
+  }
+  return null;
+}
+
+/**
+ * 물어본 예식장을 그 자리에서 조회한다.
+ * 기억해 둔 상태는 건드리지 않는다. 그 상태는 자동 감시 대상의 것이기 때문이다.
+ */
+function lookupHallText_(hall) {
+  var scan;
+  try {
+    scan = scanMonths_(hall.code);
+  } catch (e) {
+    return '❌ ' + hall.name + ' 조회 중 오류: ' + e.message;
+  }
+  if (scan.fatal || (scan.checked && scan.failed.length === scan.checked)) {
+    return '❌ ' + hall.name + ' 을(를) 확인하지 못했습니다.\n' +
+           String(scan.errors.join(' | ')).slice(0, 300);
+  }
+
+  var open = dedupeSorted_(scan.open);
+  var lines = [];
+  lines.push((open.length ? '🎉 ' : '🔍 ') + hall.name + ' — ' +
+             (open.length ? '빈자리 ' + open.length + '건' : '빈자리 없음'));
+  lines.push('확인한 달: ' + Object.keys(scan.ok).length + '개' +
+             (scan.failed.length ? ' (' + scan.failed.length + '개는 못 봄)' : ''));
+  if (open.length) {
+    lines.push('');
+    groupByMonth_(open).forEach(function (row) { lines.push(row); });
+  }
+  lines.push('');
+  lines.push(PAGE_URL);
+  return lines.join('\n');
+}
+
+/** ['2027-07-03', …] 를 '2027년 7월: 3(토), 4(일)' 처럼 달별로 묶는다. */
+function groupByMonth_(dates) {
+  var order = [], byMonth = {};
+  dates.forEach(function (d) {
+    var ym = d.slice(0, 7);
+    if (!byMonth[ym]) { byMonth[ym] = []; order.push(ym); }
+    byMonth[ym].push(Number(d.slice(8, 10)) + '(' + weekday_(d).charAt(0) + ')');
+  });
+  return order.map(function (ym) {
+    return Number(ym.slice(0, 4)) + '년 ' + Number(ym.slice(5, 7)) + '월: ' + byMonth[ym].join(', ');
+  });
 }
 
 /** 이미 처리한 메시지인가? 텔레그램의 재전송을 걸러낸다. */
@@ -428,6 +496,15 @@ function showSettings() {
   });
   console.log('자동 실행 트리거: ' + (triggers.length ? '켜짐' : '꺼짐 — createTrigger 를 실행하세요'));
   console.log('텔레그램 메시지 응답: ' + (prop_('WEBHOOK_SECRET') ? '켜짐' : '꺼짐'));
+}
+
+/** 감시 대상을 기본값(삼성금융연수원)으로 되돌린다. */
+function useDefaultHall() {
+  var props = PropertiesService.getScriptProperties();
+  props.deleteProperty('HALL_CODE');
+  props.deleteProperty('HALL_NAME');
+  console.log('자동 감시를 삼성금융연수원으로 되돌렸습니다. ' +
+              '다른 예식장은 텔레그램에서 이름을 불러 확인하세요.');
 }
 
 /** 달 지정을 지우고 '열린 달 전부' 로 되돌린다. */

@@ -121,7 +121,10 @@ function createRuntime(site, store) {
         if (site.failMonths.indexOf(ym) !== -1) {
           return { getResponseCode: () => 500, getContentText: () => 'Internal Server Error' };
         }
-        return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ rs: buildRs(site, ym) }) };
+        return {
+          getResponseCode: () => 200,
+          getContentText: () => JSON.stringify({ rs: buildRs(site, ym, body.wedgHllC) }),
+        };
       },
     },
   };
@@ -134,7 +137,7 @@ function createRuntime(site, store) {
  * 실제 응답을 그대로 흉내 낸다. 사이트는 그 달의 주말만 목록에 싣고,
  * true/false 를 따옴표로 감싼 JSON 을 HTML 이스케이프해서 rs 에 넣어 보낸다.
  */
-function buildRs(site, ym) {
+function buildRs(site, ym, hall) {
   const [y, m] = ym.split('-').map(Number);
   const days = {};
   // 예약을 아직/이미 안 받는 달은 날짜 목록 자체가 비어서 온다.
@@ -145,7 +148,9 @@ function buildRs(site, ym) {
     const wd = new Date(y, m - 1, d).getDay();
     if (wd === 0 || wd === 6) days[String(d)] = { closed: 'true' };
   }
-  (site.open[ym] || []).forEach(d => { days[String(d)] = { closed: 'false' }; });
+  // 예식장마다 다른 결과를 주고 싶으면 openByHall 을 쓴다.
+  const open = (site.openByHall && site.openByHall[hall]) || site.open;
+  (open[ym] || []).forEach(d => { days[String(d)] = { closed: 'false' }; });
   return JSON.stringify({ days }).replace(/"/g, '&quot;');
 }
 
@@ -588,6 +593,47 @@ channelSetup({
 tick();
 check('알림 봇 1번 메시지', post('상태', { b: 'main', chat: 1, updateId: 1 }).length === 1);
 check('상태 봇도 1번 메시지는 처음', post('상태', { b: 'status', chat: 2, updateId: 1 }).length === 1);
+
+// ───────── 이름을 부르면 그 예식장만 찾아보기 ─────────
+
+console.log('\n[예식장 문의] 기본 감시 대상은 삼성금융연수원(5)');
+channelSetup({ TELEGRAM_TOKEN: 't', TELEGRAM_CHAT_ID: '1', WEBHOOK_SECRET: 'secret' });
+site.open = {};
+site.openByHall = { '5': { '2027-05': [1] }, '1': { '2027-09': [4, 5], '2027-10': [2] } };
+tick();
+check('5번 홀을 감시', site.requested.every(r => r.startsWith('5/')), site.requested[0]);
+check('금융연수원 빈자리를 기억', store.openSet === '["2027-05-01"]', store.openSet);
+
+console.log('\n[예식장 문의] "서초" 라고 보내면 그 자리에서 서초사옥을 찾아본다');
+const watched = store.openSet;
+out = post('서초');
+check('찾는 중 + 결과, 2통', out.length === 2, JSON.stringify(out.map(p => p.body.slice(0, 25))));
+check('1번 홀을 조회', site.requested.every(r => r.startsWith('1/')), site.requested[0]);
+check('서초사옥 이름으로 답함', /서초사옥/.test(out[1].body), out[1].body);
+check('빈자리 3건', /빈자리 3건/.test(out[1].body), out[1].body);
+check('달별로 묶어서 보여줌', /2027년 9월: 4\(토\), 5\(일\)/.test(out[1].body), out[1].body);
+check('감시 중인 기억은 안 건드림', store.openSet === watched, store.openSet);
+
+console.log('\n[예식장 문의] "금융" 이라고 보내면 금융연수원을 찾아본다');
+out = post('금융');
+check('5번 홀을 조회', site.requested.every(r => r.startsWith('5/')), site.requested[0]);
+check('빈자리 1건', /빈자리 1건/.test(out[1].body), out[1].body);
+
+console.log('\n[예식장 문의] 빈자리가 없으면 없다고 답한다');
+site.openByHall['3'] = {};
+out = post('E&A');
+check('3번 홀을 조회', site.requested.every(r => r.startsWith('3/')), site.requested[0]);
+check('빈자리 없음', /빈자리 없음/.test(out[1].body), out[1].body);
+
+console.log('\n[예식장 문의] 예식장 이름이 없는 말은 상태로 답한다');
+out = post('상태');
+check('상태 1통', out.length === 1, JSON.stringify(out.map(p => p.body.slice(0, 20))));
+check('사이트를 부르지 않음', site.requested.length === 0, JSON.stringify(site.requested));
+
+console.log('\n[예식장 문의] 도움말에 예식장 이름이 나온다');
+out = post('도움');
+check('세 곳 모두 안내', /서초/.test(out[0].body) && /금융/.test(out[0].body) && /e&a/i.test(out[0].body),
+  out[0] && out[0].body);
 
 console.log('\n' + (failures ? failures + '개 실패' : '전부 통과'));
 process.exit(failures ? 1 : 0);
