@@ -8,6 +8,7 @@
  *    TELEGRAM_TOKEN    텔레그램 봇 토큰      ─┐ 즉시 푸시를 원하면
  *    TELEGRAM_CHAT_ID  텔레그램 채팅 ID      ─┘ 둘 다 넣으세요
  *    NTFY_TOPIC        ntfy 토픽 이름 (선택)
+ *    WEBAPP_URL        텔레그램에서 말을 걸면 답하게 하려면 (README 참고)
  *
  *    HALL_CODE         감시할 예식장 코드. 1 서초사옥 · 3 삼성E&A · 5 삼성금융연수원.
  *                      목록에 없으면 findHallCodes 를 실행해 찾으세요.
@@ -230,6 +231,146 @@ function resetState() {
   console.log('상태를 초기화했습니다.');
 }
 
+// ───────────────────────────────────────────────────────────
+//  텔레그램에서 말을 걸면 답하기 (웹훅)
+// ───────────────────────────────────────────────────────────
+
+/** 텔레그램이 보내오는 요청을 받는 자리. 절대 예외를 밖으로 던지지 않는다. */
+function doPost(e) {
+  try {
+    handleTelegramUpdate_(e);
+  } catch (err) {
+    console.error('텔레그램 메시지 처리 실패: ' + err.message);
+  }
+  // 텔레그램에는 항상 200 을 준다. 안 그러면 같은 메시지를 계속 다시 보낸다.
+  return ContentService.createTextOutput('');
+}
+
+function handleTelegramUpdate_(e) {
+  // 웹앱 주소는 공개 주소라서, 주소 뒤에 붙인 비밀값이 맞을 때만 응답한다.
+  var secret = prop_('WEBHOOK_SECRET');
+  if (!secret || !e || !e.parameter || e.parameter.s !== secret) return;
+  if (!e.postData || !e.postData.contents) return;
+
+  var update = JSON.parse(e.postData.contents);
+  var msg = update.message || update.edited_message;
+  if (!msg || !msg.chat || !msg.text) return;
+  // 내 대화방에서 온 것만 받는다.
+  if (String(msg.chat.id) !== prop_('TELEGRAM_CHAT_ID')) return;
+
+  var text = String(msg.text).trim();
+  if (/^\/?(확인|체크|check|refresh)/i.test(text)) {
+    reply_('🔎 지금 확인하고 있습니다. 20초쯤 걸립니다…');
+    reply_(runOnDemand_());
+  } else if (/^\/?(도움|help|start)/i.test(text)) {
+    reply_(['보낼 수 있는 말:', '',
+            '• 상태 — 지금 상태 보기',
+            '• 확인 — 지금 바로 다시 확인',
+            '', '아무 말이나 보내도 상태를 알려드립니다.'].join('\n'));
+  } else {
+    reply_(storedStatusText_());
+  }
+}
+
+function reply_(text) {
+  telegramApi_('sendMessage', {
+    chat_id: prop_('TELEGRAM_CHAT_ID'), text: text, disable_web_page_preview: true
+  });
+}
+
+/** 요청을 받아 지금 바로 한 번 확인한다. 결과 문장을 돌려준다. */
+function runOnDemand_() {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(3000)) return '이미 확인이 돌고 있습니다. 잠시 뒤 다시 물어봐 주세요.';
+  try {
+    runCheck_();          // 정기 실행과 같은 길. 여기서는 기다리게 하지 않으려고 지터를 건너뛴다.
+  } catch (err) {
+    return '확인 중 오류가 났습니다: ' + err.message;
+  } finally {
+    lock.releaseLock();
+  }
+  return storedStatusText_();
+}
+
+/** 사이트를 다시 부르지 않고, 기억해 둔 것만으로 상태를 적는다. */
+function storedStatusText_() {
+  var props = PropertiesService.getScriptProperties();
+  var open = readOpenSet_(props);
+  var fails = Number(props.getProperty('failCount') || 0);
+  var last = props.getProperty('lastSuccessAt');
+
+  var lines = [];
+  lines.push(fails ? '🔴 확인 실패 ' + fails + '회 연속' : '🟢 감시 중');
+  lines.push('');
+  lines.push('예식장: ' + HALL_NAME);
+  lines.push('마지막 성공: ' + (last ? ago_(last) : '아직 없음'));
+  lines.push('현재 빈자리: ' + (open.length ? open.length + '건' : '없음'));
+  if (open.length) lines.push('  ' + open.slice(0, 10).join(', ') + (open.length > 10 ? ' 외' : ''));
+
+  var error = props.getProperty('lastError');
+  if (fails && error) lines.push('', '원인: ' + error.slice(0, 200));
+
+  var on = ScriptApp.getProjectTriggers().some(function (t) {
+    return t.getHandlerFunction() === 'checkOpenings';
+  });
+  if (!on) lines.push('', '⚠️ 자동 실행이 꺼져 있습니다. 편집기에서 createTrigger 를 실행하세요.');
+
+  lines.push('', '"확인" 이라고 보내면 지금 바로 다시 봅니다.');
+  return lines.join('\n');
+}
+
+/** ISO 시각을 '3분 전 (18:52)' 처럼. */
+function ago_(iso) {
+  var then = new Date(iso);
+  var minutes = Math.round((Date.now() - then.getTime()) / 60000);
+  var when = Utilities.formatDate(then, 'Asia/Seoul', 'M월 d일 HH:mm');
+  if (minutes < 1) return '방금 (' + when + ')';
+  if (minutes < 60) return minutes + '분 전 (' + when + ')';
+  if (minutes < 60 * 24) return Math.round(minutes / 60) + '시간 전 (' + when + ')';
+  return Math.round(minutes / 1440) + '일 전 (' + when + ')';
+}
+
+/** 텔레그램에서 말을 걸면 답하도록 켠다. WEBAPP_URL 을 먼저 넣어야 한다. */
+function setupTelegramCommands() {
+  if (!hasTelegram_()) {
+    console.log('먼저 TELEGRAM_TOKEN 과 TELEGRAM_CHAT_ID 를 넣으세요.');
+    return;
+  }
+  var url = prop_('WEBAPP_URL');
+  if (!url) {
+    console.log('스크립트 속성 WEBAPP_URL 에 웹앱 주소를 넣으세요. ' +
+                '(배포 > 새 배포 > 웹 앱 > 액세스 권한 "모든 사용자" 로 배포하면 나오는 주소)');
+    return;
+  }
+  var props = PropertiesService.getScriptProperties();
+  var secret = props.getProperty('WEBHOOK_SECRET');
+  if (!secret) {
+    secret = Utilities.getUuid().replace(/-/g, '');
+    props.setProperty('WEBHOOK_SECRET', secret);
+  }
+  var res = telegramApi_('setWebhook', {
+    url: url + (url.indexOf('?') === -1 ? '?' : '&') + 's=' + secret,
+    allowed_updates: ['message']
+  });
+  if (!res.ok) {
+    console.log('설정 실패: ' + JSON.stringify(res).slice(0, 300));
+    return;
+  }
+  try {
+    telegramApi_('setMyCommands', { commands: [
+      { command: 'status', description: '지금 상태 보기' },
+      { command: 'check', description: '지금 바로 확인' }
+    ]});
+  } catch (e) { /* 메뉴 등록 실패는 동작에 지장 없다 */ }
+  console.log('켰습니다. 텔레그램에서 봇에게 "상태" 라고 보내보세요.');
+}
+
+/** 메시지 응답을 끈다. (findTelegramChatId 를 다시 쓰려면 꺼야 한다) */
+function removeTelegramCommands() {
+  telegramApi_('deleteWebhook', {});
+  console.log('메시지 응답을 껐습니다.');
+}
+
 /** 지금 설정이 어떻게 돼 있는지 보여준다. 비밀값은 '설정됨' 으로만 찍는다. */
 function showSettings() {
   var props = PropertiesService.getScriptProperties();
@@ -250,6 +391,7 @@ function showSettings() {
     return t.getHandlerFunction() === 'checkOpenings';
   });
   console.log('자동 실행 트리거: ' + (triggers.length ? '켜짐' : '꺼짐 — createTrigger 를 실행하세요'));
+  console.log('텔레그램 메시지 응답: ' + (prop_('WEBHOOK_SECRET') ? '켜짐' : '꺼짐'));
 }
 
 /** 달 지정을 지우고 '열린 달 전부' 로 되돌린다. */
@@ -307,7 +449,12 @@ function findTelegramChatId() {
   catch (e) { console.log('응답을 읽지 못했습니다: ' + res.getContentText().slice(0, 200)); return; }
 
   if (!data.ok) {
-    console.log('텔레그램이 거절했습니다. 토큰이 맞는지 확인하세요: ' + JSON.stringify(data).slice(0, 200));
+    if (/webhook/i.test(String(data.description || ''))) {
+      console.log('메시지 응답이 켜져 있어서 이 방법을 쓸 수 없습니다. ' +
+                  'removeTelegramCommands 를 먼저 실행하세요.');
+    } else {
+      console.log('텔레그램이 거절했습니다. 토큰이 맞는지 확인하세요: ' + JSON.stringify(data).slice(0, 200));
+    }
     return;
   }
   var updates = data.result || [];

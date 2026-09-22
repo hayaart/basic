@@ -33,7 +33,12 @@ function createRuntime(site, store) {
         deleteProperty: k => { delete store[k]; },
       }),
     },
-    LockService: { getScriptLock: () => ({ tryLock: () => true, releaseLock() {} }) },
+    LockService: { getScriptLock: () => ({ tryLock: () => site.locked !== true, releaseLock() {} }) },
+    ScriptApp: {
+      getProjectTriggers: () =>
+        (site.triggerOn === false ? [] : [{ getHandlerFunction: () => 'checkOpenings' }]),
+    },
+    ContentService: { createTextOutput: t => ({ getContent: () => t }) },
     Session: { getEffectiveUser: () => ({ getEmail: () => 'me@example.com' }) },
     MailApp: {
       sendEmail(opts) {
@@ -57,6 +62,7 @@ function createRuntime(site, store) {
           .replace('SSS', pad(d.getUTCMilliseconds(), 3));
       },
       base64Encode: s => Buffer.from(s, 'utf8').toString('base64'),
+      getUuid: () => 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
       Charset: { UTF_8: 'utf8' },
     },
     UrlFetchApp: {
@@ -70,8 +76,8 @@ function createRuntime(site, store) {
           if (edit && site.editFails) {
             return { getResponseCode: () => 400, getContentText: () => '{"ok":false,"description":"message to edit not found"}' };
           }
-          // 살아있음 메시지는 알림이 아니라 따로 센다.
-          if (/^[🟢🟡🔴]/.test(body.text)) {
+          // 고정해두는 살아있음 메시지는 알림이 아니라 따로 센다.
+          if (edit || /이 메시지가 갱신됩니다/.test(body.text)) {
             status.push({ edit: edit, id: body.message_id, text: body.text });
           } else {
             sent.push({ channel: 'telegram', title: body.text.split('\n')[0], body: body.text });
@@ -423,6 +429,58 @@ console.log('\n[상태메시지] 텔레그램을 안 쓰면 아무것도 안 한
 channelSetup({ NTFY_TOPIC: 'test-topic' });
 tick();
 check('상태 메시지 없음', lastStatus.length === 0, JSON.stringify(lastStatus));
+
+// ───────── 텔레그램에서 말 걸면 답하기 ─────────
+
+/** 텔레그램이 보내오는 요청을 흉내 낸다. 답장 목록을 돌려준다. */
+function post(text, opts) {
+  opts = opts || {};
+  site.requested = [];
+  const { ctx, sent } = createRuntime(site, store);
+  ctx.doPost({
+    parameter: { s: 'secret' in opts ? opts.secret : store.WEBHOOK_SECRET },
+    postData: { contents: JSON.stringify({ message: { text: text, chat: { id: opts.chat || 1 } } }) },
+  });
+  return sent;
+}
+
+console.log('\n[대화] 상태를 물으면 사이트를 다시 부르지 않고 바로 답한다');
+channelSetup({ TELEGRAM_TOKEN: 't', TELEGRAM_CHAT_ID: '1', WEBHOOK_SECRET: 'secret' });
+site.open = { '2027-05': [1] };
+tick();
+out = post('상태');
+check('답장 1통', out.length === 1, JSON.stringify(out.map(p => p.body)));
+check('감시 중으로 답함', out[0] && /🟢/.test(out[0].body), out[0] && out[0].body);
+check('빈자리 건수 포함', out[0] && /1건/.test(out[0].body), out[0] && out[0].body);
+check('사이트는 부르지 않음', site.requested.length === 0, JSON.stringify(site.requested));
+
+console.log('\n[대화] "확인" 이라고 하면 지금 바로 다시 본다');
+site.open['2027-06'] = [5];
+out = post('확인');
+check('확인 중 + 결과, 2통 이상', out.length >= 2, JSON.stringify(out.map(p => p.body.slice(0, 20))));
+check('사이트를 실제로 부름', site.requested.length > 0, String(site.requested.length));
+check('새 빈자리가 상태에 반영', store.openSet.indexOf('2027-06-05') !== -1, store.openSet);
+
+console.log('\n[대화] 이미 확인이 돌고 있으면 겹쳐 돌리지 않는다');
+site.locked = true;
+out = post('확인');
+check('돌고 있다고 답함', out.some(p => /이미 확인/.test(p.body)), JSON.stringify(out.map(p => p.body)));
+site.locked = false;
+
+console.log('\n[대화] 비밀값이나 대화방이 다르면 아무 답도 하지 않는다');
+check('비밀값 불일치 → 무응답', post('상태', { secret: 'wrong' }).length === 0);
+check('비밀값 없음 → 무응답', post('상태', { secret: undefined }).length === 0);
+check('다른 대화방 → 무응답', post('상태', { chat: 99 }).length === 0);
+
+console.log('\n[대화] 자동 실행이 꺼져 있으면 답장에 경고를 넣는다');
+site.triggerOn = false;
+out = post('상태');
+check('경고 포함', out[0] && /자동 실행이 꺼져/.test(out[0].body), out[0] && out[0].body);
+site.triggerOn = true;
+
+console.log('\n[대화] 도움말도 답한다');
+out = post('/help');
+check('명령 안내', out[0] && /상태/.test(out[0].body) && /확인/.test(out[0].body), out[0] && out[0].body);
 
 console.log('\n' + (failures ? failures + '개 실패' : '전부 통과'));
 process.exit(failures ? 1 : 0);
