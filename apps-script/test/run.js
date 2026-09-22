@@ -79,6 +79,7 @@ function createRuntime(site, store) {
         }
         const body = JSON.parse(opts.payload);
         const ym = body.wedgEtblfmPsbY + '-' + body.wedgEtblfmPsbMm;
+        site.requested.push(body.wedgHllC + '/' + ym);
         if (site.failMonths.indexOf(ym) !== -1) {
           return { getResponseCode: () => 500, getContentText: () => 'Internal Server Error' };
         }
@@ -130,11 +131,13 @@ const site = {
   ntfyStatus: 200,
   telegramStatus: 200,
   emailOk: true,
+  requested: [],
 };
 const store = { NTFY_TOPIC: 'test-topic' };
 
 /** 한 회차를 돌리고 그동안 나간 알림을 돌려준다. */
 function tick() {
+  site.requested = [];
   const { ctx, sent } = createRuntime(site, store);
   ctx.checkOpenings();
   return sent;
@@ -215,6 +218,15 @@ function channelSetup(props) {
   site.emailOk = true;
 }
 
+function settingsSetup(props) {
+  clearState();
+  Object.keys(props).forEach(k => { store[k] = props[k]; });
+  site.failMonths = [];
+  site.ntfyStatus = 200;
+  site.telegramStatus = 200;
+  site.emailOk = true;
+}
+
 console.log('\n[채널] ntfy 만 설정하면 ntfy 로 간다');
 channelSetup({ NTFY_TOPIC: 'test-topic' });
 out = tick();
@@ -258,6 +270,40 @@ site.emailOk = false;
 out = tick();
 check('알림 0통', out.length === 0);
 check('그래도 상태는 기록됨', store.openSet === '["2027-05-01"]', store.openSet);
+
+// ───────── 설정 (예식장 / 월) ─────────
+
+console.log('\n[설정] MONTHS 속성이 있으면 그 달만 조회한다');
+settingsSetup({ MONTHS: '2027-05, 잘못된값, 2027-09' });
+site.open = { '2027-05': [1] };
+tick();
+check('두 달만 조회', site.requested.length === 2, JSON.stringify(site.requested));
+check('잘못된 값은 무시', site.requested.every(r => /2027-05|2027-09/.test(r)), JSON.stringify(site.requested));
+
+console.log('\n[설정] HALL_CODE 속성이 요청에 실린다');
+settingsSetup({ HALL_CODE: '9', MONTHS: '2027-05' });
+site.open = { '2027-05': [1] };
+tick();
+check('홀 9 로 조회', site.requested[0] === '9/2027-05', JSON.stringify(site.requested));
+check('기억해 둔 홀도 9', store.hallCode === '9', store.hallCode);
+
+console.log('\n[설정] 예식장을 바꾸면 이전 홀의 기억이 새 홀 알림을 막지 않는다');
+settingsSetup({ HALL_CODE: '5', MONTHS: '2027-05' });
+site.open = { '2027-05': [1] };
+out = tick();
+check('홀 5 에서 알림 1통', out.length === 1, JSON.stringify(out.map(p => p.title)));
+check('같은 홀에서는 재알림 없음', tick().length === 0);
+
+store.HALL_CODE = '9';
+out = tick();
+check('홀을 바꾸니 같은 날짜라도 다시 알림', out.length === 1, JSON.stringify(out.map(p => p.title)));
+check('바뀐 홀이 기록됨', store.hallCode === '9', store.hallCode);
+
+console.log('\n[설정] HALL_NAME 이 알림 제목에 쓰인다');
+settingsSetup({ HALL_CODE: '9', HALL_NAME: '서초사옥', MONTHS: '2027-05' });
+site.open = { '2027-05': [1] };
+out = tick();
+check('제목에 서초사옥', out[0] && /서초사옥/.test(out[0].title), out[0] && out[0].title);
 
 console.log('\n' + (failures ? failures + '개 실패' : '전부 통과'));
 process.exit(failures ? 1 : 0);

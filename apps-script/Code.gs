@@ -9,18 +9,25 @@
  *    TELEGRAM_CHAT_ID  텔레그램 채팅 ID      ─┘ 둘 다 넣으세요
  *    NTFY_TOPIC        ntfy 토픽 이름 (선택)
  *
+ *    HALL_CODE         감시할 예식장 코드. 기본값 5 (삼성금융연수원).
+ *                      모르면 findHallCodes 를 실행해 찾으세요.
+ *    HALL_NAME         알림에 쓸 이름. 기본값 삼성금융연수원
+ *    MONTHS            노리는 월. 쉼표로 구분: 2027-05, 2027-06
+ *
  *  알림은 [텔레그램 → ntfy → 이메일] 순으로 시도하고, 하나라도 성공하면 멈춥니다.
  *  이메일은 설정이 없어도 항상 마지막 보루로 동작합니다.
  *************************************************************/
 
-var HALL_CODE = '5';                                             // 5 = 삼성금융연수원
-var MONTHS    = ['2027-05', '2027-06', '2027-09', '2027-10', '2027-11'];
+// 아래는 기본값이고, 스크립트 속성에 같은 이름을 넣으면 그쪽이 우선합니다.
+var HALL_CODE = prop_('HALL_CODE') || '5';                       // 5 = 삼성금융연수원
+var HALL_NAME = prop_('HALL_NAME') || '삼성금융연수원';
+var MONTHS    = parseMonths_(prop_('MONTHS')) ||
+                ['2027-05', '2027-06', '2027-09', '2027-10', '2027-11'];
 
 /*************************************************************
  *  ▲▲▲ 여기 위쪽만 신경 쓰면 됩니다. 아래는 안 건드려도 돼요 ▲▲▲
  *************************************************************/
 
-var HALL_NAME = '삼성금융연수원';
 var PAGE_URL  = 'https://s-wedding.samsungcard.com/internal/add-apply/UWDDWSWH04M1.jsp';
 var SVC_URL   = 'https://s-wedding.samsungcard.com/service/SWDDWSWSWHS03';
 
@@ -53,6 +60,7 @@ function checkOpenings() {
 
 function runCheck_() {
   var props = PropertiesService.getScriptProperties();
+  forgetIfHallChanged_(props);
   var prev = readOpenSet_(props);
   var prevSet = toSet_(prev);
 
@@ -176,9 +184,41 @@ function createTrigger() {
 /** 기억해 둔 상태를 지운다. 다음 실행에서 현재 열린 날을 전부 새 빈자리로 다시 알립니다. */
 function resetState() {
   var props = PropertiesService.getScriptProperties();
-  ['openSet', 'failCount', 'failAlerted', 'lastError', 'lastSuccessAt', 'lastHeartbeatAt']
+  ['openSet', 'hallCode', 'failCount', 'failAlerted', 'lastError', 'lastSuccessAt', 'lastHeartbeatAt']
     .forEach(function (k) { props.deleteProperty(k); });
   console.log('상태를 초기화했습니다.');
+}
+
+/**
+ * 예식장 코드를 찾아준다. 1~15 번을 한 달치씩 훑어서 결과를 찍는다.
+ * 원하는 예식장 번호를 찾으면 스크립트 속성 HALL_CODE 에 넣으세요.
+ */
+function findHallCodes() {
+  var ym = MONTHS[0];
+  var cookie;
+  try { cookie = getCookie_(); }
+  catch (e) { console.log('세션 쿠키 발급 실패 → ' + e.message); return; }
+
+  console.log(ym + ' 기준으로 예식장 코드 1~15 를 훑어봅니다. (현재 설정: ' +
+              HALL_CODE + ' = ' + HALL_NAME + ')');
+  var showedKeys = false;
+  for (var code = 1; code <= 15; code++) {
+    if (code > 1) Utilities.sleep(GAP_MS);
+    try {
+      var month = fetchOpenDays_(cookie, ym, false, String(code));
+      console.log('코드 ' + code + ' → 조회된 날 ' + month.total + '개 / 열린 날 ' +
+                  month.open.length + '개' +
+                  (month.open.length ? ': ' + month.open.join(', ') : ''));
+      if (!showedKeys && month.total) {
+        // 응답 어딘가에 예식장 이름이 들어 있을 수 있어서 한 번만 훑어본다.
+        console.log('   (응답 항목: ' + Object.keys(month.raw).join(', ') + ')');
+        showedKeys = true;
+      }
+    } catch (e) {
+      console.log('코드 ' + code + ' → ' + e.message);
+    }
+  }
+  console.log('열린 날이 있는 코드가 찾는 예식장일 가능성이 큽니다.');
 }
 
 /**
@@ -234,11 +274,14 @@ function getCookie_() {
   return cookie;
 }
 
-/** 한 달을 조회해 { open: [날짜…], total: 조회된 날 수 } 를 돌려준다. */
-function fetchOpenDays_(cookie, ym, verbose) {
+/**
+ * 한 달을 조회해 { open: [날짜…], total: 조회된 날 수, raw: 응답 원본 } 을 돌려준다.
+ * hallCode 를 주면 그 홀을, 안 주면 설정된 홀을 본다.
+ */
+function fetchOpenDays_(cookie, ym, verbose, hallCode) {
   var y = ym.slice(0, 4), m = ym.slice(5, 7);
   var body = {
-    wedgHllC: HALL_CODE, wedgEtblfmPsbY: y, wedgEtblfmPsbMm: m, wedgAplcBooStc: '4',
+    wedgHllC: hallCode || HALL_CODE, wedgEtblfmPsbY: y, wedgEtblfmPsbMm: m, wedgAplcBooStc: '4',
     common: buildCommon_()
   };
   var res = UrlFetchApp.fetch(SVC_URL, {
@@ -262,14 +305,16 @@ function fetchOpenDays_(cookie, ym, verbose) {
 
   // rs 는 HTML 이스케이프된 JSON 문자열이고, 그 안의 true/false 가 따옴표로 묶여 있다.
   var rsStr = htmlUnescape_(j.rs).replace(/"true"/g, 'true').replace(/"false"/g, 'false');
-  var days;
-  try { days = (JSON.parse(rsStr).days) || {}; }
-  catch (e) { throw new Error('rs 안쪽을 해석하지 못했습니다: ' + rsStr.slice(0, 120)); }
+  var parsed, days;
+  try {
+    parsed = JSON.parse(rsStr);
+    days = parsed.days || {};
+  } catch (e) { throw new Error('rs 안쪽을 해석하지 못했습니다: ' + rsStr.slice(0, 120)); }
   if (typeof days !== 'object') throw new Error("'days' 가 객체가 아닙니다: " + typeof days);
 
   if (verbose) console.log(ym + ' 원본 days: ' + JSON.stringify(days).slice(0, 400));
 
-  var result = { open: [], total: 0 };
+  var result = { open: [], total: 0, raw: parsed };
   Object.keys(days).forEach(function (d) {
     var day = parseInt(d, 10);
     if (!validDate_(parseInt(y, 10), parseInt(m, 10), day)) return;
@@ -438,6 +483,23 @@ function maybeHeartbeat_(props, openCount) {
 function prop_(key) {
   var value = PropertiesService.getScriptProperties().getProperty(key);
   return value ? String(value).trim() : '';
+}
+
+/** 쉼표로 구분된 '2027-05, 2027-06' 을 배열로. 쓸 수 있는 값이 없으면 null. */
+function parseMonths_(text) {
+  if (!text) return null;
+  var list = String(text).split(',')
+    .map(function (s) { return s.trim(); })
+    .filter(function (s) { return /^\d{4}-(0[1-9]|1[0-2])$/.test(s); });
+  return list.length ? list : null;
+}
+
+/** 감시할 예식장이 바뀌었으면 이전 홀의 기록을 지운다. */
+function forgetIfHallChanged_(props) {
+  if (props.getProperty('hallCode') === HALL_CODE) return;
+  // 날짜만 기억하기 때문에, 그대로 두면 이전 홀에서 봤던 날짜가 새 홀의 알림을 가로막는다.
+  props.deleteProperty('openSet');
+  props.setProperty('hallCode', HALL_CODE);
 }
 
 function readOpenSet_(props) {
