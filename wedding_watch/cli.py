@@ -50,6 +50,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-v", "--verbose", action="store_true", help="디버그 로그")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    setup = sub.add_parser("setup", help="처음 설정을 대화형으로 만들기 (여기서 시작하세요)")
+    setup.add_argument("--example", default="config.example.yaml", help="기본값을 가져올 파일")
+
     sub.add_parser("run", help="설정한 간격으로 계속 감시 (기본 10분)")
     once = sub.add_parser("check", help="한 번만 확인하고 종료 (cron 용)")
     once.add_argument("--dry-run", action="store_true", help="알림을 보내지 않고 결과만 출력")
@@ -58,6 +61,11 @@ def build_parser() -> argparse.ArgumentParser:
     discover = sub.add_parser("discover", help="실제 예약 API 요청을 캡처해 설정 후보 생성")
     discover.add_argument("--url", help="브라우저를 시작할 주소 (기본: 설정의 login_url)")
     discover.add_argument("--out", default="discover", help="캡처 결과를 저장할 디렉터리")
+    discover.add_argument(
+        "--no-apply",
+        action="store_true",
+        help="config.yaml 을 자동으로 고치지 않고 추천 파일만 만든다",
+    )
 
     sub.add_parser("test-notify", help="ntfy 설정이 맞는지 테스트 알림 발송")
     sub.add_parser("test-login", help="자동 재로그인 설정이 맞는지 확인")
@@ -105,10 +113,16 @@ def cmd_login(config: Config) -> int:
     return 0
 
 
-def cmd_discover(config: Config, url: str | None, out: str) -> int:
+def cmd_discover(config: Config, args) -> int:
     from .discover import capture_requests
 
-    capture_requests(url or config.source.login_url, config.source.storage_state, out)
+    capture_requests(
+        args.url or config.source.login_url,
+        config.source.storage_state,
+        args.out,
+        config_path=None if args.no_apply else args.config,
+        hall_code=config.target.hall_code,
+    )
     return 0
 
 
@@ -155,15 +169,26 @@ def cmd_state(config: Config) -> int:
     return 0
 
 
+# 조회 설정(source)이 반드시 채워져 있어야 하는 명령들.
+_NEEDS_SOURCE = {"run", "check", "test-login"}
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     setup_logging(args.verbose)
     load_dotenv()
 
+    if args.command == "setup":
+        from .setup_wizard import run_setup
+
+        return run_setup(args.config, args.example, ".env")
+
     try:
-        config = load_config(args.config)
+        config = load_config(args.config, require_source=args.command in _NEEDS_SOURCE)
     except ConfigError as exc:
         print(f"설정 오류: {exc}", file=sys.stderr)
+        if not Path(args.config).exists():
+            print("\n처음이신가요?  wedding-watch setup  을 먼저 실행하세요.", file=sys.stderr)
         return 2
 
     if args.command == "run":
@@ -173,7 +198,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "login":
         return cmd_login(config)
     if args.command == "discover":
-        return cmd_discover(config, args.url, args.out)
+        return cmd_discover(config, args)
     if args.command == "test-notify":
         return cmd_test_notify(config)
     if args.command == "test-login":

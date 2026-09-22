@@ -55,8 +55,23 @@ def save_login(login_url: str, storage_state: str | Path, timeout_minutes: int =
     return storage_state
 
 
+def pick_login_form(form_posts: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """아이디 칸과 비밀번호 칸이 둘 다 있는 폼을 로그인 폼으로 본다."""
+    for post in form_posts:
+        names = post["field_names"]
+        if _guess_field(names, ("id", "user", "mbr", "login")) and _guess_field(
+            names, ("pw", "pass", "pwd")
+        ):
+            return post
+    return None
+
+
 def capture_requests(
-    start_url: str, storage_state: str | Path, out_dir: str | Path
+    start_url: str,
+    storage_state: str | Path,
+    out_dir: str | Path,
+    config_path: str | Path | None = None,
+    hall_code: str = "",
 ) -> Path:
     """브라우저를 띄워 사용자가 탐색하는 동안 JSON 응답을 모두 기록한다."""
     sync_playwright = _require_playwright()
@@ -151,11 +166,41 @@ def capture_requests(
         suggestion_path = out_dir / "suggested_config.yaml"
         suggestion_path.write_text(render_suggestions(suggestions), encoding="utf-8")
         print(f"추천 설정을 만들었습니다: {suggestion_path}")
-        print("config.yaml 의 source.api 부분에 붙여 넣고 값을 확인하세요.")
     else:
         print("날짜가 들어 있는 응답을 찾지 못했습니다.")
         print("captured.json 을 직접 열어 보거나, source.mode 를 browser 로 바꿔 쓰세요.")
+
+    if config_path and suggestions:
+        _apply(config_path, suggestions[0], pick_login_form(form_posts), hall_code)
+    elif suggestions:
+        print("config.yaml 의 source.api 부분에 붙여 넣고 값을 확인하세요.")
     return report_path
+
+
+def _apply(config_path, suggestion, login_form, hall_code: str) -> None:
+    """가장 그럴듯한 후보를 config.yaml 에 바로 써 넣는다."""
+    from .autoconfig import apply_to_config, build_api_section, build_login_section
+
+    api_section = build_api_section(suggestion, hall_code)
+    login_section = build_login_section(login_form) if login_form else None
+    apply_to_config(config_path, api_section, login_section)
+
+    print()
+    print("=" * 64)
+    print(f" {config_path} 에 자동으로 설정을 써 넣었습니다.")
+    print(f"   주소      : {api_section['url']}")
+    print(f"   날짜 필드 : {api_section['response']['date_field']}")
+    if "status_field" in api_section["response"]:
+        print(
+            f"   가능 여부 : {api_section['response']['status_field']} "
+            f"== {api_section['response']['available_values']}"
+        )
+    if login_section:
+        print(f"   자동 로그인: 켬 ({login_section['url']})")
+    print()
+    print(" 이제 이 명령으로 잘 되는지 확인하세요:")
+    print("   wedding-watch check --dry-run")
+    print("=" * 64)
 
 
 # --- 응답 분석 ---------------------------------------------------------

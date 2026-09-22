@@ -9,6 +9,9 @@
 
 ---
 
+> 🙋 **개발을 모르신다면 → [사용설명서.md](사용설명서.md) 를 보세요.**
+> 터미널 명령 복사·붙여넣기 수준으로 따라 할 수 있게 따로 썼습니다. 아래는 개발자용 문서입니다.
+
 ## ⚠️ 먼저 읽어주세요 — 한 단계는 직접 하셔야 합니다
 
 결혼도움방(`s-wedding.samsungcard.com`)은 **삼성 임직원 로그인 전용**이고, 예약 달력을 그리는
@@ -21,28 +24,32 @@
 
 ---
 
-## 설치
+## 빠른 시작
 
 ```bash
 git clone https://github.com/hayaart/basic.git wedding-watch && cd wedding-watch
+bash install.sh                  # venv + 의존성 + chromium
+
+./.venv/bin/wedding-watch setup        # 대화형 설정 (config.yaml + .env 생성)
+./.venv/bin/wedding-watch test-notify  # 폰에 알림 확인
+./.venv/bin/wedding-watch discover     # 브라우저에서 로그인 + 달력 넘기기 → 설정 자동 완성
+./.venv/bin/wedding-watch run          # 감시 시작
+```
+
+`setup` 이 임의의 ntfy 토픽을 만들어 주고, `discover` 가 캡처한 요청을 `config.yaml` 에 바로 써 넣습니다.
+수동으로 하고 싶다면 아래를 참고하세요.
+
+## 수동 설치
+
+```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[browser,dev]"
 playwright install chromium          # login / discover / browser 모드에 필요
-```
-
-## 1. 설정 파일 만들기
-
-```bash
-cp config.example.yaml config.yaml
-cp .env.example .env
+cp config.example.yaml config.yaml && cp .env.example .env
 ```
 
 `.env` 의 `WW_NTFY_TOPIC` 을 **남이 절대 못 맞출 임의 문자열**로 바꾸세요.
 ntfy 토픽은 이름을 아는 사람이면 누구나 구독할 수 있습니다.
-
-```bash
-WW_NTFY_TOPIC=samsung-wedding-3f9a2c7d41
-```
 
 휴대폰에 **ntfy 앱**([iOS](https://apps.apple.com/app/ntfy/id1625396347) /
 [Android](https://play.google.com/store/apps/details?id=io.heckel.ntfy))을 설치하고 같은 토픽을 구독한 뒤:
@@ -69,16 +76,18 @@ wedding-watch login
 wedding-watch discover
 ```
 
-브라우저가 열리면 **삼성금융연수원 예약 달력**을 열고 **2027년 5월 → 6월 → 9월…** 처럼 월을 몇 번 넘겨보세요.
-그동안 오간 JSON 요청을 전부 기록하고, 그중 "날짜 목록처럼 생긴" 응답을 골라 설정 후보를 만들어 줍니다.
+브라우저가 열리면 **로그인**하고, **삼성금융연수원 예약 달력**에서 **2027년 5월 → 6월 → 9월…** 처럼
+월을 몇 번 넘겨보세요. 그동안 오간 JSON 요청을 전부 기록하고, "날짜 목록처럼 생긴" 응답을 골라
+**`config.yaml` 의 `source.api` 와 `source.login` 을 자동으로 채웁니다.**
 
 ```
 discover/captured.json          # 캡처된 원본 (쿠키·인증 헤더는 제외하고 저장)
-discover/suggested_config.yaml  # 바로 붙여 넣을 수 있는 설정 후보
+discover/suggested_config.yaml  # 후보 목록 (자동 반영이 틀렸을 때 참고용)
+discover/suggested_login.yaml   # 로그인 폼 후보 (필드 이름만, 값은 저장 안 함)
 ```
 
-`suggested_config.yaml` 의 내용을 `config.yaml` 의 `source.api` 에 옮기고, 날짜·홀코드 부분을
-자리표시자로 바꿔 주세요 — 그래야 매달 자동으로 조회됩니다.
+`--no-apply` 를 주면 `config.yaml` 을 건드리지 않고 추천 파일만 만듭니다. 그때는 아래처럼
+날짜·홀코드를 자리표시자로 직접 바꿔 주세요 — 그래야 매달 자동으로 조회됩니다.
 
 | 자리표시자 | 값 (2027년 5월 기준) |
 |---|---|
@@ -128,6 +137,7 @@ wedding-watch run                # 10분마다 계속 확인 (Ctrl+C 로 종료)
 
 | 명령 | 설명 |
 |---|---|
+| `wedding-watch setup` | 대화형 초기 설정 (여기서 시작) |
 | `wedding-watch run` | 설정한 간격으로 계속 감시 |
 | `wedding-watch check` | 한 번만 확인 (cron 용) |
 | `wedding-watch check --dry-run` | 확인만 하고 알림·상태 저장 안 함 |
@@ -261,6 +271,8 @@ wedding_watch/
   notify.py       ntfy 전송 (한글 제목 RFC2047 인코딩)
   watcher.py      감시 루프: 조회 → 비교 → 알림
   discover.py     로그인 세션 저장 + API/로그인폼 캡처 및 분석
+  autoconfig.py   캡처 결과를 config.yaml 에 자동 반영
+  setup_wizard.py 대화형 초기 설정
   adapters/
     api.py        내부 JSON API 직접 호출 (기본) + 자동 재로그인
     browser.py    Playwright 로 달력 렌더링해 읽기

@@ -217,11 +217,17 @@ class Config:
     ntfy: NtfyConfig = field(default_factory=NtfyConfig)
     state_file: str = "state/seen.json"
 
-    def validate(self) -> None:
+    def validate(self, require_source: bool = True) -> None:
+        """require_source=False 면 조회 설정(source)은 검사하지 않는다.
+
+        `login`/`discover` 는 source 를 '채우기 위해' 실행하는 명령이라,
+        아직 비어 있는 것이 정상이다.
+        """
         self.target.validate()
         self.poll.validate()
-        self.source.validate()
         self.ntfy.validate()
+        if require_source:
+            self.source.validate()
 
 
 def _build(cls: type, data: Any):
@@ -286,7 +292,9 @@ def apply_env_overrides(config: Config, environ: dict[str, str] | None = None) -
     return config
 
 
-def load_config(path: str | Path, environ: dict[str, str] | None = None) -> Config:
+def load_config(
+    path: str | Path, environ: dict[str, str] | None = None, require_source: bool = True
+) -> Config:
     path = Path(path)
     if not path.exists():
         raise ConfigError(
@@ -296,5 +304,5 @@ def load_config(path: str | Path, environ: dict[str, str] | None = None) -> Conf
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     config = _build(Config, raw)
     apply_env_overrides(config, environ)
-    config.validate()
+    config.validate(require_source=require_source)
     return config
