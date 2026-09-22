@@ -28,13 +28,19 @@
 
 ```bash
 git clone https://github.com/hayaart/basic.git wedding-watch && cd wedding-watch
-bash install.sh                  # venv + 의존성 + chromium
+
+# 맥 / 리눅스
+bash install.sh
+# 윈도우 (PowerShell)
+powershell -ExecutionPolicy Bypass -File .\install.ps1
 
 ./.venv/bin/wedding-watch setup        # 대화형 설정 (config.yaml + .env 생성)
 ./.venv/bin/wedding-watch test-notify  # 폰에 알림 확인
 ./.venv/bin/wedding-watch discover     # 브라우저에서 로그인 + 달력 넘기기 → 설정 자동 완성
 ./.venv/bin/wedding-watch run          # 감시 시작
 ```
+
+> 윈도우는 실행 파일 경로가 다릅니다: `.venv\Scripts\wedding-watch setup`
 
 `setup` 이 임의의 ntfy 토픽을 만들어 주고, `discover` 가 캡처한 요청을 `config.yaml` 에 바로 써 넣습니다.
 수동으로 하고 싶다면 아래를 참고하세요.
