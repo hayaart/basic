@@ -117,10 +117,15 @@ function createRuntime(site, store) {
           return { getResponseCode: () => 200, getContentText: () => '{"id":"x"}' };
         }
         if (url.indexOf('.jsp') !== -1) {
+          if (site.blocked) return { getResponseCode: () => 403, getAllHeaders: () => ({}),
+                                     getContentText: () => 'Forbidden' };
           return {
-            getResponseCode: () => (site.cookieOk ? 200 : 302),
+            getResponseCode: () => 200,
             getAllHeaders: () => (site.cookieOk ? { 'Set-Cookie': ['JSESSIONID=abc; Path=/'] } : {}),
           };
+        }
+        if (site.blocked) {
+          return { getResponseCode: () => 403, getContentText: () => 'Forbidden' };
         }
         const body = JSON.parse(opts.payload);
         const ym = body.wedgEtblfmPsbY + '-' + body.wedgEtblfmPsbMm;
@@ -185,6 +190,7 @@ function check(name, condition, detail) {
 
 const site = {
   cookieOk: true,
+  blocked: false,
   failMonths: [],
   open: { '2027-05': [1, 2] },   // 2027-05-01(토), 05-02(일)
   ntfyStatus: 200,
@@ -240,18 +246,18 @@ check('실패 횟수 초기화', store.failCount === '0' && store.partialCount =
   store.failCount + '/' + store.partialCount);
 
 console.log('\n[상태] 전체 실패가 이어지면 점검 알림이 한 번만 간다');
-site.cookieOk = false;
+site.blocked = true;
 const snapshot = store.openSet;
 check('1회차 조용함', tick().length === 0);
 check('2회차 조용함', tick().length === 0);
 out = tick();
 check('3회차에 점검 알림', out.length === 1 && /확인 실패/.test(out[0].title), JSON.stringify(out));
-check('점검 알림에 원인 포함', out[0] && /세션 쿠키/.test(out[0].body), out[0] && out[0].body);
+check('점검 알림에 원인 포함', out[0] && /403/.test(out[0].body), out[0] && out[0].body);
 check('4회차는 중복 알림 없음', tick().length === 0);
 check('상태는 그대로 보존', store.openSet === snapshot, store.openSet);
 
 console.log('\n[상태] 복구되면 복구 알림이 간다');
-site.cookieOk = true;
+site.blocked = false;
 out = tick();
 check('복구 알림 포함', out.some(p => /복구/.test(p.title)), JSON.stringify(out.map(p => p.title)));
 check('그 다음 회차는 조용함', tick().length === 0);
@@ -434,11 +440,11 @@ check('다음부터는 고쳐 씀', lastStatus.length === 1 && lastStatus[0].edi
 check('같은 메시지를 유지', store.statusMsgId === firstId, store.statusMsgId);
 
 console.log('\n[상태메시지] 확인이 안 되면 빨간불로 바뀐다');
-site.cookieOk = false;
+site.blocked = true;
 tick();
 check('멈춤으로 표시', /^🔴/.test(lastStatus[0].text), lastStatus[0] && lastStatus[0].text.split('\n')[0]);
-check('원인도 적힘', /세션 쿠키/.test(lastStatus[0].text), lastStatus[0] && lastStatus[0].text);
-site.cookieOk = true;
+check('원인도 적힘', /403/.test(lastStatus[0].text), lastStatus[0] && lastStatus[0].text);
+site.blocked = false;
 
 console.log('\n[상태메시지] 메시지를 지웠으면 새로 만든다');
 channelSetup({ TELEGRAM_TOKEN: 't', TELEGRAM_CHAT_ID: '1' });
@@ -532,12 +538,12 @@ check('하트비트 1통', out.length === 1 && /감시 중/.test(out[0].title), 
 check('상태 봇으로 감', out[0] && out[0].bot === 'st', out[0] && out[0].bot);
 
 console.log('\n[두봇] 실패 알림은 알림 봇으로 간다 (놓치면 안 되는 것이므로)');
-site.cookieOk = false;
+site.blocked = true;
 tick(); tick();
 out = tick();
 check('점검 알림이 알림 봇으로', out.some(p => /확인 실패/.test(p.title) && p.bot === 't'),
   JSON.stringify(out.map(p => p.title + '@' + p.bot)));
-site.cookieOk = true;
+site.blocked = false;
 
 console.log('\n[두봇] 상태 봇을 바꾸면 상태 메시지를 새로 만든다');
 store.STATUS_TELEGRAM_CHAT_ID = '3';
@@ -731,6 +737,29 @@ check('한도를 넘길 것 같으면 경고', /한도에 가깝/.test(lastStatu
   lastStatus[0] && lastStatus[0].text);
 
 check('실행 시간을 매번 기록', Number(store.lastRunMs) >= 0, store.lastRunMs);
+
+// ───────── 사이트가 쿠키를 안 줄 때 ─────────
+
+console.log('\n[쿠키] 사이트가 세션 쿠키를 안 줘도 조회는 시도한다');
+channelSetup({ TELEGRAM_TOKEN: 't', TELEGRAM_CHAT_ID: '1' });
+site.cookieOk = false;          // 달력 페이지는 200 인데 Set-Cookie 가 없다
+site.open = { '2027-05': [1] };
+out = tick();
+check('빈자리 알림이 정상적으로 감', out.length === 1 && isSlotAlert(out[0]),
+  JSON.stringify(out.map(p => p.title)));
+check('실패로 세지 않음', !Number(store.failCount || 0) && !Number(store.partialCount || 0),
+  store.failCount + '/' + store.partialCount);
+check('상태는 감시 중', /🟢/.test(lastStatus[0].text), lastStatus[0] && lastStatus[0].text.split('\n')[0]);
+site.cookieOk = true;
+
+console.log('\n[쿠키] 사이트가 통째로 막히면 그때 실패로 본다');
+channelSetup({ TELEGRAM_TOKEN: 't', TELEGRAM_CHAT_ID: '1' });
+site.blocked = true;
+tick(); tick();
+out = tick();
+check('점검 알림', out.length === 1 && /확인 실패/.test(out[0].title), JSON.stringify(out.map(p => p.title)));
+check('403 을 원인으로 알려줌', out[0] && /403/.test(out[0].body), out[0] && out[0].body);
+site.blocked = false;
 
 console.log('\n' + (failures ? failures + '개 실패' : '전부 통과'));
 process.exit(failures ? 1 : 0);

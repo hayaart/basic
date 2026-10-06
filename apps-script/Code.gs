@@ -152,9 +152,9 @@ function scanMonths_(hallCode) {
   try {
     cookie = getCookie_();
   } catch (e) {
-    // 쿠키를 못 받으면 어느 달도 조회할 수 없다.
+    // 사이트에 닿지도 못한 경우. 어느 달도 조회할 수 없다.
     result.fatal = true;
-    result.errors.push(e.message);
+    result.errors.push('달력 페이지를 열지 못했습니다: ' + e.message);
     return result;
   }
 
@@ -630,6 +630,84 @@ function useAllMonths() {
 }
 
 /**
+ * 사이트가 지금 무엇을 돌려주는지 그대로 찍는다. 사이트가 바뀌었을 때 쓴다.
+ * 주소가 옮겨갔는지, 쿠키를 주는지, 응답이 JSON 인지 HTML 인지 한 번에 본다.
+ */
+function probeSite() {
+  console.log('달력 페이지: ' + PAGE_URL);
+  console.log('조회 주소:   ' + SVC_URL);
+  console.log('');
+
+  var first;
+  try {
+    first = UrlFetchApp.fetch(PAGE_URL, { muteHttpExceptions: true, followRedirects: false });
+  } catch (e) {
+    console.log('① 달력 페이지를 열지 못했습니다: ' + e.message);
+    return;
+  }
+  var h = first.getAllHeaders();
+  console.log('① 달력 페이지 응답: HTTP ' + first.getResponseCode());
+  var moved = h['Location'] || h['location'];
+  if (moved) {
+    console.log('   → 다른 주소로 보냅니다: ' + moved);
+    console.log('     (PAGE_URL 을 이 주소로 바꿔야 할 수 있습니다)');
+  }
+  var sc = h['Set-Cookie'] || h['set-cookie'] || [];
+  if (typeof sc === 'string') sc = [sc];
+  console.log('   세션 쿠키: ' + (sc.length
+    ? sc.map(function (c) { return c.split('=')[0]; }).join(', ') : '❌ 주지 않음'));
+  var body = first.getContentText('UTF-8');
+  var title = /<title[^>]*>([\s\S]{0,80})<\/title>/i.exec(body);
+  if (title) console.log('   페이지 제목: ' + title[1].trim());
+  console.log('   본문 앞부분: ' + body.slice(0, 200).replace(/\s+/g, ' '));
+  if (/로그인|login/i.test(body.slice(0, 3000))) {
+    console.log('   ⚠️ 로그인 화면으로 보입니다. 로그인이 필요해졌을 수 있습니다.');
+  }
+
+  var cookie = '';
+  try { cookie = getCookie_(); } catch (e) { /* 위에서 이미 보고했다 */ }
+  var ym = (FIXED_MONTHS && FIXED_MONTHS[0]) || currentMonth_();
+  var attempts = cookie ? [['쿠키 포함', cookie], ['쿠키 없이', '']] : [['쿠키 없이', '']];
+
+  attempts.forEach(function (pair) {
+    console.log('');
+    console.log('② 조회 시도 (' + pair[0] + ', ' + ym + ')');
+    var hdr = { 'X-Requested-With': 'XMLHttpRequest', 'Referer': PAGE_URL };
+    if (pair[1]) hdr['Cookie'] = pair[1];
+    var res;
+    try {
+      res = UrlFetchApp.fetch(SVC_URL, {
+        method: 'post', contentType: 'application/json; charset=UTF-8', headers: hdr,
+        payload: JSON.stringify({
+          wedgHllC: HALL_CODE, wedgEtblfmPsbY: ym.slice(0, 4), wedgEtblfmPsbMm: ym.slice(5, 7),
+          wedgAplcBooStc: '4', common: buildCommon_()
+        }),
+        muteHttpExceptions: true, followRedirects: true
+      });
+    } catch (e) {
+      console.log('   부르지 못했습니다: ' + e.message);
+      return;
+    }
+    var rc = res.getResponseCode();
+    var rt = res.getContentText('UTF-8');
+    console.log('   HTTP ' + rc + ' · 응답 길이 ' + rt.length);
+    console.log('   앞부분: ' + rt.slice(0, 300).replace(/\s+/g, ' '));
+    if (rc === 200) {
+      try {
+        var j = JSON.parse(rt);
+        console.log('   ✅ JSON 입니다. 최상위 항목: ' + Object.keys(j).join(', '));
+        if (j.rs === undefined) console.log('   ⚠️ rs 가 없습니다. 응답 구조가 바뀌었습니다.');
+      } catch (e) {
+        console.log('   ⚠️ JSON 이 아닙니다. 주소가 옮겨갔거나 차단된 것입니다.');
+      }
+    }
+  });
+
+  console.log('');
+  console.log('이 로그를 그대로 공유하면 어디가 바뀐 것인지 가려낼 수 있습니다.');
+}
+
+/**
  * 예식장 코드를 찾아준다. 1~15 번을 한 달치씩 훑어서 결과를 찍는다.
  * 원하는 예식장 번호를 찾으면 스크립트 속성 HALL_CODE 에 넣으세요.
  */
@@ -721,8 +799,17 @@ function fetchWithRetry_(url, options) {
   }
 }
 
+/**
+ * 달력 페이지를 한 번 열어 세션 쿠키를 받아 온다.
+ *
+ * 쿠키를 못 받아도 여기서 끊지 않는다. 사이트가 쿠키를 안 주도록 바뀔 수도 있는데,
+ * 그때 '쿠키를 못 받았다' 로 멈추면 정작 조회가 되는지는 영영 알 수 없다.
+ * 되는지 안 되는지는 실제 조회가 판정하게 한다 — 그쪽 오류 메시지가 훨씬 구체적이다.
+ * 사이트에 닿지도 못할 때만 예외를 올린다.
+ */
 function getCookie_() {
-  var res = fetchWithRetry_(PAGE_URL, { muteHttpExceptions: true, followRedirects: false });
+  // 리디렉션을 따라간다. 사이트가 다른 주소로 보내면서 거기서 쿠키를 주는 경우가 있다.
+  var res = fetchWithRetry_(PAGE_URL, { muteHttpExceptions: true, followRedirects: true });
   var headers = res.getAllHeaders();
   var sc = headers['Set-Cookie'] || headers['set-cookie'] || [];
   if (typeof sc === 'string') sc = [sc];
@@ -730,9 +817,8 @@ function getCookie_() {
                  .filter(function (c) { return c; })
                  .join('; ');
   if (!cookie) {
-    // 쿠키 없이 그냥 진행하면 전부 로그인 페이지를 받아 조용히 실패한다. 여기서 끊는 편이 낫다.
-    throw new Error('세션 쿠키를 받지 못했습니다 (HTTP ' + res.getResponseCode() +
-                    '). 사이트가 Google 서버 IP를 막았을 수 있습니다.');
+    console.log('세션 쿠키가 없습니다 (HTTP ' + res.getResponseCode() +
+                '). 쿠키 없이 조회를 시도합니다. 자세히 보려면 probeSite 를 실행하세요.');
   }
   return cookie;
 }
@@ -747,10 +833,12 @@ function fetchOpenDays_(cookie, ym, verbose, hallCode) {
     wedgHllC: hallCode || HALL_CODE, wedgEtblfmPsbY: y, wedgEtblfmPsbMm: m, wedgAplcBooStc: '4',
     common: buildCommon_()
   };
+  var headers = { 'X-Requested-With': 'XMLHttpRequest', 'Referer': PAGE_URL };
+  if (cookie) headers['Cookie'] = cookie;   // 빈 Cookie 헤더는 보내지 않는다
   var res = fetchWithRetry_(SVC_URL, {
     method: 'post',
     contentType: 'application/json; charset=UTF-8',
-    headers: { 'Cookie': cookie, 'X-Requested-With': 'XMLHttpRequest', 'Referer': PAGE_URL },
+    headers: headers,
     payload: JSON.stringify(body),
     muteHttpExceptions: true, followRedirects: true
   });
