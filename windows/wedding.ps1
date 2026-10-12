@@ -24,6 +24,20 @@ $Halls    = @(
   @{ code="5"; name="삼성금융연수원" }
 )
 $IntervalMinutes = 20
+
+# 꼭 잡고 싶은 날짜. 이 날이 열리면 '긴급 알림' 으로 따로, 여러 번 보냅니다.
+$HotDates      = @("2027-05-22","2027-05-29")
+$HotRepeat     = 3     # 몇 번 보낼지
+$HotGapSeconds = 60    # 보내는 간격
+
+# 긴급 알림을 받을 전용 봇. wedding-bot.json 의 hotToken / hotChatId 로 넣습니다.
+# 비워 두면 평소 알림 봇으로 갑니다 (여러 번 보내는 것은 그대로 동작).
+#
+# 전용 봇을 쓰는 이유: 텔레그램은 알림 소리·강도를 '대화방 단위' 로만 정할 수 있습니다.
+# 봇이 메시지마다 소리를 다르게 할 방법이 없으므로, 진짜로 더 강하게 받으려면
+# 대화방을 따로 두고 그 방에만 전용 소리·긴급 중요도·방해금지 예외를 걸어야 합니다.
+$HotToken  = ""
+$HotChatId = ""
 # ================
 
 $PageUrl   = "https://s-wedding.samsungcard.com/internal/add-apply/UWDDWSWH04M1.jsp"
@@ -39,8 +53,10 @@ $BotTask   = "WeddingSlotBot"
 if (Test-Path $SecretFile) {
   try {
     $sec = Get-Content $SecretFile -Raw -Encoding UTF8 | ConvertFrom-Json
-    if ($sec.token)  { $BotToken = [string]$sec.token }
-    if ($sec.chatId) { $ChatId   = [string]$sec.chatId }
+    if ($sec.token)     { $BotToken  = [string]$sec.token }
+    if ($sec.chatId)    { $ChatId    = [string]$sec.chatId }
+    if ($sec.hotToken)  { $HotToken  = [string]$sec.hotToken }
+    if ($sec.hotChatId) { $HotChatId = [string]$sec.hotChatId }
   } catch { Write-Host "wedding-bot.json 을 읽지 못했습니다. 스크립트 안의 값을 씁니다." }
 }
 $Api = "https://api.telegram.org/bot$BotToken"
@@ -53,15 +69,30 @@ function Keyboard {
   return @{ inline_keyboard = @(, $row) }
 }
 
-function Send-Telegram([string]$text, $withButtons=$false) {
-  if ($BotToken -like "PUT-YOUR-*") { Write-Host "봇 토큰이 설정되지 않았습니다."; return }
-  $p = @{ chat_id=$ChatId; text=$text; disable_web_page_preview=$true }
+function Send-To([string]$token, [string]$chat, [string]$text, $withButtons=$false) {
+  if (-not $token -or $token -like "PUT-YOUR-*") { Write-Host "봇 토큰이 설정되지 않았습니다."; return }
+  $p = @{ chat_id=$chat; text=$text; disable_web_page_preview=$true }
   if ($withButtons) { $p.reply_markup = (Keyboard) }
   $bytes = [Text.Encoding]::UTF8.GetBytes(($p | ConvertTo-Json -Depth 8 -Compress))
   try {
-    Invoke-RestMethod -Uri "$Api/sendMessage" -Method Post `
+    Invoke-RestMethod -Uri "https://api.telegram.org/bot$token/sendMessage" -Method Post `
       -ContentType "application/json; charset=utf-8" -Body $bytes -TimeoutSec 35 | Out-Null
   } catch { Write-Host ("텔레그램 전송 실패: " + $_.Exception.Message) }
+}
+
+function Send-Telegram([string]$text, $withButtons=$false) {
+  Send-To $BotToken $ChatId $text $withButtons
+}
+
+# 긴급 알림. 전용 봇이 있으면 그쪽으로, 없으면 평소 봇으로. 어느 쪽이든 여러 번 보낸다.
+function Send-Hot([string]$text) {
+  $t = if ($HotToken)  { $HotToken }  else { $BotToken }
+  $c = if ($HotChatId) { $HotChatId } else { $ChatId }
+  for ($i = 0; $i -lt $HotRepeat; $i++) {
+    $suffix = if ($HotRepeat -gt 1) { "`n`n(" + ($i+1) + "/" + $HotRepeat + ")" } else { "" }
+    Send-To $t $c ($text + $suffix)
+    if ($i -lt ($HotRepeat - 1)) { Start-Sleep -Seconds $HotGapSeconds }
+  }
 }
 
 # ───────── 사이트 조회 ─────────
@@ -192,12 +223,24 @@ function Do-Check {
 
   if ($newly.Count -gt 0) {
     if (Looks-Suspicious $r) {
+      # 형식이 바뀐 것으로 의심되면 긴급으로 올리지 않는다. 헛울림을 긴급으로 보내면
+      # 정작 진짜일 때 믿지 않게 된다.
       Send-Telegram ("⚠️ 확인 필요 — $HallName " + $newly.Count + "건`n" +
         "조회된 날이 거의 전부 열림으로 나옵니다. 사이트 응답이 바뀐 것일 수 있으니 직접 확인해 보세요.`n`n" +
         (Group-ByMonth $newly) + "`n`n" + $PageUrl)
     } else {
-      Send-Telegram ("🎉 $HallName 빈자리 " + $newly.Count + "건!`n" +
-        (Group-ByMonth $newly) + "`n`n지금 신청: " + $PageUrl)
+      $hot    = @($newly | Where-Object { $HotDates -contains $_ })
+      $normal = @($newly | Where-Object { $HotDates -notcontains $_ })
+
+      if ($normal.Count -gt 0) {
+        Send-Telegram ("🎉 $HallName 빈자리 " + $normal.Count + "건!`n" +
+          (Group-ByMonth $normal) + "`n`n지금 신청: " + $PageUrl)
+      }
+      if ($hot.Count -gt 0) {
+        Send-Hot ("🚨🚨 노리던 날짜가 열렸습니다 🚨🚨`n`n" +
+          "$HallName`n" + (Group-ByMonth $hot) + "`n`n" +
+          "지금 바로 신청하세요: " + $PageUrl)
+      }
     }
   }
   Save-State $openNow $null
@@ -216,6 +259,12 @@ function Hall-Report($code, $name) {
          (Group-ByMonth $r.open) + "`n`n" + $PageUrl
 }
 
+function Hot-Line {
+  if ($HotDates.Count -eq 0) { return "" }
+  $where = if ($HotToken) { "전용 봇" } else { "이 봇" }
+  return "`n긴급 알림: " + ($HotDates -join ", ") + " → " + $where + "로 " + $HotRepeat + "회"
+}
+
 function Status-Text {
   $on = $false
   try { $on = ((Get-ScheduledTask -TaskName $CheckTask -ErrorAction Stop).State -ne "Disabled") } catch { }
@@ -225,7 +274,7 @@ function Status-Text {
   $cnt  = if ($st -and $st.open) { @($st.open).Count } else { 0 }
   return "자동 감시($HallName, $IntervalMinutes분마다): $s`n" +
          "마지막 확인: $when`n" +
-         "기억 중인 빈자리: $cnt건`n`n" +
+         "기억 중인 빈자리: $cnt건" + (Hot-Line) + "`n`n" +
          "아래 버튼으로 각 예식장을 지금 바로 조회할 수 있어요."
 }
 
@@ -321,6 +370,13 @@ function Uninstall-All {
 
 function Run-Test {
   Send-Telegram "🔔 테스트 — 빈자리 지킴이. 이 메시지가 오면 연결 성공!"
+  if ($HotDates.Count -gt 0) {
+    $where = if ($HotToken) { "전용 봇" } else { "평소 봇(전용 봇 미설정)" }
+    Write-Host ("긴급 알림 대상: " + ($HotDates -join ", ") + "  →  " + $where + ", " + $HotRepeat + "회 발송")
+    $ht = if ($HotToken)  { $HotToken }  else { $BotToken }
+    $hc = if ($HotChatId) { $HotChatId } else { $ChatId }
+    Send-To $ht $hc "🚨 긴급 알림 테스트 — 이 방의 알림을 가장 강하게 설정해 두세요."
+  }
   $r = Fetch-Hall $HallCode
   Write-Host ("결과 → 확인한 달={0} 실패={1} 조회된 날={2} 빈자리={3}" -f `
     $r.okMonths.Count, $r.failed.Count, $r.totalDays, (($r.open) -join ", "))
