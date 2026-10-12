@@ -63,6 +63,16 @@ var SUSPICIOUS_RATIO     = 0.8;
 // 자동 탐색: 예약을 아예 안 받는 달이 이만큼 연달아 나오면 거기가 끝이라고 본다.
 var STOP_AFTER_EMPTY = 3;
 
+// 사이트가 브라우저가 아닌 요청을 거르는 듯하면 이것들을 같이 보낸다.
+// (Apps Script 가 User-Agent 를 덮어쓸 수도 있어서 통하지 않을 수 있다)
+var BROWSER_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+                '(KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
+  'Accept': 'application/json, text/javascript, */*; q=0.01',
+  'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8',
+  'Origin': 'https://s-wedding.samsungcard.com'
+};
+
 // ───────────────────────────────────────────────────────────
 //  트리거에서 10분마다 자동 실행되는 함수
 // ───────────────────────────────────────────────────────────
@@ -631,80 +641,95 @@ function useAllMonths() {
 
 /**
  * 사이트가 지금 무엇을 돌려주는지 그대로 찍는다. 사이트가 바뀌었을 때 쓴다.
- * 주소가 옮겨갔는지, 쿠키를 주는지, 응답이 JSON 인지 HTML 인지 한 번에 본다.
+ *
+ * 차단 안내 페이지를 받고 있다면, 무엇 때문에 막히는지 좁혀야 한다.
+ * 헤더 조합을 바꿔 가며 눌러 보고 어느 조합이 통하는지 본다.
+ * 어느 조합도 안 통하면 헤더 문제가 아니라 IP·로그인 문제다.
  */
 function probeSite() {
   console.log('달력 페이지: ' + PAGE_URL);
   console.log('조회 주소:   ' + SVC_URL);
-  console.log('');
 
-  var first;
-  try {
-    first = UrlFetchApp.fetch(PAGE_URL, { muteHttpExceptions: true, followRedirects: false });
-  } catch (e) {
-    console.log('① 달력 페이지를 열지 못했습니다: ' + e.message);
-    return;
-  }
-  var h = first.getAllHeaders();
-  console.log('① 달력 페이지 응답: HTTP ' + first.getResponseCode());
-  var moved = h['Location'] || h['location'];
-  if (moved) {
-    console.log('   → 다른 주소로 보냅니다: ' + moved);
-    console.log('     (PAGE_URL 을 이 주소로 바꿔야 할 수 있습니다)');
-  }
-  var sc = h['Set-Cookie'] || h['set-cookie'] || [];
-  if (typeof sc === 'string') sc = [sc];
-  console.log('   세션 쿠키: ' + (sc.length
-    ? sc.map(function (c) { return c.split('=')[0]; }).join(', ') : '❌ 주지 않음'));
-  var body = first.getContentText('UTF-8');
-  var title = /<title[^>]*>([\s\S]{0,80})<\/title>/i.exec(body);
-  if (title) console.log('   페이지 제목: ' + title[1].trim());
-  console.log('   본문 앞부분: ' + body.slice(0, 200).replace(/\s+/g, ' '));
-  if (/로그인|login/i.test(body.slice(0, 3000))) {
-    console.log('   ⚠️ 로그인 화면으로 보입니다. 로그인이 필요해졌을 수 있습니다.');
-  }
-
+  // ① 달력 페이지 — 기본 헤더와 브라우저 헤더로 각각
   var cookie = '';
-  try { cookie = getCookie_(); } catch (e) { /* 위에서 이미 보고했다 */ }
-  var ym = (FIXED_MONTHS && FIXED_MONTHS[0]) || currentMonth_();
-  var attempts = cookie ? [['쿠키 포함', cookie], ['쿠키 없이', '']] : [['쿠키 없이', '']];
-
-  attempts.forEach(function (pair) {
+  [['기본', null], ['브라우저 헤더', BROWSER_HEADERS]].forEach(function (pair) {
     console.log('');
-    console.log('② 조회 시도 (' + pair[0] + ', ' + ym + ')');
-    var hdr = { 'X-Requested-With': 'XMLHttpRequest', 'Referer': PAGE_URL };
-    if (pair[1]) hdr['Cookie'] = pair[1];
+    console.log('① 달력 페이지 (' + pair[0] + ')');
+    var opt = { muteHttpExceptions: true, followRedirects: false };
+    if (pair[1]) opt.headers = pair[1];
+    var res;
+    try { res = UrlFetchApp.fetch(PAGE_URL, opt); }
+    catch (e) { console.log('   열지 못했습니다: ' + e.message); return; }
+
+    var h = res.getAllHeaders();
+    console.log('   HTTP ' + res.getResponseCode());
+    var moved = h['Location'] || h['location'];
+    if (moved) console.log('   → 다른 주소로 보냅니다: ' + moved);
+    var sc = h['Set-Cookie'] || h['set-cookie'] || [];
+    if (typeof sc === 'string') sc = [sc];
+    console.log('   세션 쿠키: ' + (sc.length
+      ? sc.map(function (c) { return c.split('=')[0]; }).join(', ') : '❌ 주지 않음'));
+    if (sc.length && !cookie) {
+      cookie = sc.map(function (c) { return c.split(';')[0]; }).join('; ');
+    }
+    var body = res.getContentText('UTF-8');
+    var title = /<title[^>]*>([\s\S]{0,80})<\/title>/i.exec(body);
+    console.log('   페이지 제목: ' + (title ? title[1].trim() : '(없음)'));
+    if (looksBlocked_(body)) console.log('   ⚠️ 차단 안내 페이지입니다');
+    if (/로그인|login/i.test(body.slice(0, 3000))) console.log('   ⚠️ 로그인 화면으로 보입니다');
+  });
+
+  // ② 조회 — 헤더 조합을 바꿔 가며
+  var ym = (FIXED_MONTHS && FIXED_MONTHS[0]) || currentMonth_();
+  var base = { 'X-Requested-With': 'XMLHttpRequest', 'Referer': PAGE_URL };
+  var withBrowser = {};
+  Object.keys(base).forEach(function (k) { withBrowser[k] = base[k]; });
+  Object.keys(BROWSER_HEADERS).forEach(function (k) { withBrowser[k] = BROWSER_HEADERS[k]; });
+  var withCookie = {};
+  Object.keys(withBrowser).forEach(function (k) { withCookie[k] = withBrowser[k]; });
+  if (cookie) withCookie['Cookie'] = cookie;
+
+  var tries = [['기본 헤더만', base], ['+ 브라우저 헤더', withBrowser]];
+  if (cookie) tries.push(['+ 브라우저 헤더 + 쿠키', withCookie]);
+
+  var anyOk = false;
+  tries.forEach(function (pair) {
+    console.log('');
+    console.log('② 조회 (' + pair[0] + ', ' + ym + ')');
     var res;
     try {
       res = UrlFetchApp.fetch(SVC_URL, {
-        method: 'post', contentType: 'application/json; charset=UTF-8', headers: hdr,
+        method: 'post', contentType: 'application/json; charset=UTF-8', headers: pair[1],
         payload: JSON.stringify({
           wedgHllC: HALL_CODE, wedgEtblfmPsbY: ym.slice(0, 4), wedgEtblfmPsbMm: ym.slice(5, 7),
           wedgAplcBooStc: '4', common: buildCommon_()
         }),
         muteHttpExceptions: true, followRedirects: true
       });
-    } catch (e) {
-      console.log('   부르지 못했습니다: ' + e.message);
-      return;
-    }
-    var rc = res.getResponseCode();
+    } catch (e) { console.log('   부르지 못했습니다: ' + e.message); return; }
+
     var rt = res.getContentText('UTF-8');
-    console.log('   HTTP ' + rc + ' · 응답 길이 ' + rt.length);
-    console.log('   앞부분: ' + rt.slice(0, 300).replace(/\s+/g, ' '));
-    if (rc === 200) {
-      try {
-        var j = JSON.parse(rt);
-        console.log('   ✅ JSON 입니다. 최상위 항목: ' + Object.keys(j).join(', '));
-        if (j.rs === undefined) console.log('   ⚠️ rs 가 없습니다. 응답 구조가 바뀌었습니다.');
-      } catch (e) {
-        console.log('   ⚠️ JSON 이 아닙니다. 주소가 옮겨갔거나 차단된 것입니다.');
-      }
+    console.log('   HTTP ' + res.getResponseCode() + ' · 길이 ' + rt.length);
+    try {
+      var j = JSON.parse(rt);
+      console.log('   ✅ JSON 입니다. 최상위 항목: ' + Object.keys(j).join(', '));
+      if (j.rs === undefined) console.log('   ⚠️ rs 가 없습니다. 응답 구조가 바뀌었습니다.');
+      else anyOk = true;
+    } catch (e) {
+      console.log(looksBlocked_(rt) ? '   ⚠️ 차단 안내 페이지입니다'
+                                    : '   ⚠️ JSON 이 아닙니다: ' + rt.slice(0, 120));
     }
   });
 
   console.log('');
-  console.log('이 로그를 그대로 공유하면 어디가 바뀐 것인지 가려낼 수 있습니다.');
+  if (anyOk) {
+    console.log('✅ 통하는 조합이 있습니다. 위에서 성공한 조합을 알려주세요.');
+  } else {
+    console.log('❌ 어느 헤더 조합으로도 통하지 않습니다.');
+    console.log('   헤더 문제가 아니라 접속한 곳(구글 서버 IP)이나 로그인 때문입니다.');
+    console.log('   본인 브라우저에서 같은 주소가 열리는지 확인해 보세요.');
+    console.log('   브라우저에서는 열린다면 Apps Script 로는 더 못 갑니다.');
+  }
 }
 
 /**
@@ -809,7 +834,9 @@ function fetchWithRetry_(url, options) {
  */
 function getCookie_() {
   // 리디렉션을 따라간다. 사이트가 다른 주소로 보내면서 거기서 쿠키를 주는 경우가 있다.
-  var res = fetchWithRetry_(PAGE_URL, { muteHttpExceptions: true, followRedirects: true });
+  var res = fetchWithRetry_(PAGE_URL, {
+    muteHttpExceptions: true, followRedirects: true, headers: BROWSER_HEADERS
+  });
   var headers = res.getAllHeaders();
   var sc = headers['Set-Cookie'] || headers['set-cookie'] || [];
   if (typeof sc === 'string') sc = [sc];
@@ -834,6 +861,7 @@ function fetchOpenDays_(cookie, ym, verbose, hallCode) {
     common: buildCommon_()
   };
   var headers = { 'X-Requested-With': 'XMLHttpRequest', 'Referer': PAGE_URL };
+  Object.keys(BROWSER_HEADERS).forEach(function (k) { headers[k] = BROWSER_HEADERS[k]; });
   if (cookie) headers['Cookie'] = cookie;   // 빈 Cookie 헤더는 보내지 않는다
   var res = fetchWithRetry_(SVC_URL, {
     method: 'post',
@@ -848,8 +876,15 @@ function fetchOpenDays_(cookie, ym, verbose, hallCode) {
   if (code !== 200) throw new Error('HTTP ' + code + ': ' + text.slice(0, 120));
 
   var j;
-  try { j = JSON.parse(text); }
-  catch (e) { throw new Error('응답이 JSON이 아님(차단 의심): ' + text.slice(0, 120)); }
+  try {
+    j = JSON.parse(text);
+  } catch (e) {
+    if (looksBlocked_(text)) {
+      throw new Error('사이트가 접근을 차단했습니다 (데이터가 아니라 안내 페이지를 받았습니다). ' +
+                      'probeSite 를 실행해 보세요.');
+    }
+    throw new Error('응답이 JSON이 아닙니다: ' + text.slice(0, 120));
+  }
   if (j.rs === undefined || j.rs === null) {
     throw new Error("응답에 'rs' 가 없습니다: " + text.slice(0, 120));
   }
@@ -1239,6 +1274,13 @@ function validDate_(y, m, d) {
   if (!d || isNaN(d)) return false;
   var dt = new Date(y, m - 1, d);
   return dt.getFullYear() === y && dt.getMonth() === m - 1 && dt.getDate() === d;
+}
+
+/** 응답이 데이터가 아니라 차단 안내 페이지인가? */
+function looksBlocked_(text) {
+  var head = String(text).slice(0, 2000);
+  return /페이지 접근 불가|접근이 제한|접근할 수 없|Access Denied|Forbidden/i.test(head) ||
+         /^\s*<(!DOCTYPE|html)/i.test(head);
 }
 
 function htmlUnescape_(s) {
