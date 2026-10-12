@@ -2,3 +2,5 @@
 *.ps1 text eol=crlf
 # 셸 스크립트에 CR 이 섞이면 bash 가 깨진다. 항상 LF 로.
 *.sh text eol=lf
+# .bat 도 CRLF 가 안전하다.
+*.bat text eol=crlf
