@@ -450,7 +450,8 @@ Apps Script 가 `ContentService` 로 답하면 구글이 **302 리디렉션**을
 | 상태 봇 채팅 ID 찾기 | `findStatusTelegramChatId` |
 | 확인 주기 바꾸기 | `createTrigger` 안의 `everyMinutes(10)` 수정 후 다시 실행 |
 | 알림 기억 지우기 | `resetState` 실행 |
-| 잠시 멈추기 | 왼쪽 **⏰ 트리거** → ⋮ → **트리거 삭제** |
+| 잠시 멈추기 | **`pauseWatching` 실행** (알림과 실행 시간 소모가 멈춥니다) |
+| 다시 켜기 | **`createTrigger` 실행** |
 | 지금 당장 한 번 확인 | `checkOpenings` 실행 |
 
 ---

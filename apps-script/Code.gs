@@ -249,6 +249,24 @@ function createTrigger() {
   console.log('10분마다 실행되는 트리거를 만들었습니다.');
 }
 
+/**
+ * 감시를 멈춘다. 트리거를 지우므로 알림도, 실행 시간 소모도 멈춘다.
+ * 사이트가 막혀 고칠 때까지 기다려야 할 때 쓴다. 다시 켜려면 createTrigger.
+ */
+function pauseWatching() {
+  var removed = 0;
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'checkOpenings') { ScriptApp.deleteTrigger(t); removed++; }
+  });
+  // 멈춘 사이에 쌓인 실패 기록도 지운다. 다시 켤 때 곧바로 점검 알림이 가지 않게.
+  var props = PropertiesService.getScriptProperties();
+  ['failCount', 'failAlerted', 'partialCount', 'partialAlerted'].forEach(function (k) {
+    props.deleteProperty(k);
+  });
+  console.log(removed ? '감시를 멈췄습니다 (트리거 ' + removed + '개 삭제). 다시 켜려면 createTrigger 를 실행하세요.'
+                      : '이미 멈춰 있습니다.');
+}
+
 /** 기억해 둔 상태를 지운다. 다음 실행에서 현재 열린 날을 전부 새 빈자리로 다시 알립니다. */
 function resetState() {
   var props = PropertiesService.getScriptProperties();
